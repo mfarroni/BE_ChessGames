@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Garry Kasparov",
+    "rating": 2812,
+    "wins": 154,
+    "losses": 12
+  },
+  {
+    "name": "Magnus Carlsen",
+    "rating": 2882,
+    "wins": 180,
+    "losses": 8
+  },
+  {
+    "name": "Bobby Fischer",
+    "rating": 2785,
+    "wins": 112,
+    "losses": 14
+  },
+  {
+    "name": "Deep Blue AI",
+    "rating": 2720,
+    "wins": 95,
+    "losses": 40
+  },
+  {
+    "name": "WoodMaster_99",
+    "rating": 1650,
+    "wins": 22,
+    "losses": 18
+  },
+  {
+    "name": "Rook_Whisperer",
+    "rating": 1580,
+    "wins": 15,
+    "losses": 14
+  }
+]
