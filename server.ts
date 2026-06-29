@@ -3,8 +3,7 @@ import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer as createViteServer } from 'vite';
-import { Player, ChessGame, LeaderboardEntry, WsMessage } from './types';
+import { Player, ChessGame, LeaderboardEntry, WsMessage } from './types.js';
 import pg from 'pg';
 import nodemailer from 'nodemailer';
 const { Pool } = pg;
@@ -456,7 +455,7 @@ const isTokenValid = (req: express.Request): boolean => {
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Initialize PostgreSQL schema if DATABASE_URL is present
   await initPgDb();
@@ -1918,6 +1917,7 @@ async function startServer() {
 
   // Vite development integration
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
