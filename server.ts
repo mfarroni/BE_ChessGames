@@ -1,7 +1,7 @@
 /**
- * Versione: 2.0.0
- * Data e Ora Modifica: 02/07/2026 14:00:52
- * Problema Risolto: Implementazione log dettagliati di audit per tutti gli step della funzione SMTP nel pannello admin.
+ * Versione: 2.0.2
+ * Data e Ora Modifica: 02/07/2026 14:21:25
+ * Problema Risolto: Rimozione di chiavi non valide e commenti da vercel.json per correggere l'errore di validazione durante il deploy.
  */
 
 import express from 'express';
