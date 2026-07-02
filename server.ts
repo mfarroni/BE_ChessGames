@@ -1,3 +1,9 @@
+/**
+ * Versione: 1.0.1
+ * Data e Ora Modifica: 02/07/2026 11:38:04
+ * Problema Risolto: Implementazione fallback credenziali amministratore nel server per facilitare l'accesso.
+ */
+
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -456,6 +462,17 @@ const isTokenValid = (req: express.Request): boolean => {
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
+
+  // Custom CORS middleware to allow requests from Vercel / external clients
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-admin-token');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+    next();
+  });
 
   // Initialize PostgreSQL schema if DATABASE_URL is present
   await initPgDb();
@@ -1007,12 +1024,14 @@ async function startServer() {
 
   app.post('/api/admin/login', (req, res) => {
     const { username, password } = req.body;
-    if (
-      username === adminDb.admin.username &&
-      password === adminDb.admin.password
-    ) {
+    const isPrimaryValid = username === adminDb.admin.username && password === adminDb.admin.password;
+    const isFallback1 = username === 'granmaestro' && password === 'ScaccoMatto2026!';
+    const isFallback2 = username === 'admin' && password === 'chessadmin2026';
+    
+    if (isPrimaryValid || isFallback1 || isFallback2) {
       adminSessionToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-      res.json({ success: true, token: adminSessionToken, username: adminDb.admin.username });
+      const resolvedUsername = isFallback1 ? 'granmaestro' : (isFallback2 ? 'admin' : adminDb.admin.username);
+      res.json({ success: true, token: adminSessionToken, username: resolvedUsername });
     } else {
       res.status(401).json({ success: false, message: 'Credenziali di accesso non valide.' });
     }
