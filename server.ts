@@ -1,7 +1,7 @@
 /**
- * Versione: 2.0.3
- * Data e Ora Modifica: 02/07/2026 14:28:10
- * Problema Risolto: Rimozione di chiavi non valide e commenti da entrambi i file vercel.json (root e frontend) per risolvere l'errore di deploy.
+ * Versione: 2.0.6
+ * Data e Ora Modifica: 02/07/2026 15:37:30
+ * Problema Risolto: Migliorato il feedback dell'autenticazione con controllo per gli account amministratori inseriti nel modulo dei giocatori.
  */
 
 import express from 'express';
@@ -859,6 +859,13 @@ async function startServer() {
     if (!username || !password) {
       return res.status(400).json({ success: false, message: 'Username e password sono richiesti.' });
     }
+    const checkUsername = (username || '').trim().toLowerCase();
+    if (checkUsername === 'admin' || checkUsername === 'granmaestro') {
+      return res.status(401).json({
+        success: false,
+        message: "Attenzione: questo è il modulo per i giocatori. Per accedere al pannello di amministrazione, vai all'indirizzo '/admin' nel browser."
+      });
+    }
     try {
       const user = await getUserByUsername(username.trim());
       if (!user || user.password !== password.trim()) {
@@ -1091,16 +1098,33 @@ async function startServer() {
 
   app.post('/api/admin/login', (req, res) => {
     const { username, password } = req.body;
-    const isPrimaryValid = username === adminDb.admin.username && password === adminDb.admin.password;
-    const isFallback1 = username === 'granmaestro' && password === 'ScaccoMatto2026!';
-    const isFallback2 = username === 'admin' && password === 'chessadmin2026';
+    
+    const cleanUsername = (username || '').trim().toLowerCase();
+    const cleanPassword = (password || '').trim();
+
+    const dbAdminUser = (adminDb.admin.username || '').trim().toLowerCase();
+    const dbAdminPass = (adminDb.admin.password || '').trim();
+
+    const isPrimaryValid = cleanUsername === dbAdminUser && cleanPassword === dbAdminPass;
+    const isFallback1 = cleanUsername === 'granmaestro' && cleanPassword === 'ScaccoMatto2026!';
+    const isFallback2 = cleanUsername === 'admin' && cleanPassword === 'chessadmin2026';
     
     if (isPrimaryValid || isFallback1 || isFallback2) {
       adminSessionToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
       const resolvedUsername = isFallback1 ? 'granmaestro' : (isFallback2 ? 'admin' : adminDb.admin.username);
+      addLog(`[ACCESSO ADMIN] Accesso autorizzato con successo per l'amministratore: "${resolvedUsername}"`, 'info');
       res.json({ success: true, token: adminSessionToken, username: resolvedUsername });
     } else {
-      res.status(401).json({ success: false, message: 'Credenziali di accesso non valide.' });
+      addLog(`[ACCESSO ADMIN] Tentativo di login fallito. Username inserito: "${(username || '').trim()}"`, 'warn');
+      
+      let debugMessage = 'Credenziali di accesso non valide.';
+      if (cleanUsername !== dbAdminUser && cleanUsername !== 'granmaestro' && cleanUsername !== 'admin') {
+        debugMessage += ` Nome utente "${(username || '').trim()}" non riconosciuto come amministratore nel database o tra i fallback.`;
+      } else {
+        debugMessage += ` Password non corretta per l'utente "${(username || '').trim()}".`;
+      }
+      
+      res.status(401).json({ success: false, message: debugMessage });
     }
   });
 
