@@ -1,10 +1,12 @@
 /**
- * Versione: 2.0.6
- * Data e Ora Modifica: 02/07/2026 15:37:30
- * Problema Risolto: Migliorato il feedback dell'autenticazione con controllo per gli account amministratori inseriti nel modulo dei giocatori.
+ * Versione: 2.0.7
+ * Data e Ora Modifica: 02/07/2026 15:53:56
+ * Problema Risolto: Aggiunto l'import e l'inizializzazione di dotenv per caricare correttamente le variabili d'ambiente SMTP.
  */
 
 import express from 'express';
+import dotenv from 'dotenv';
+dotenv.config();
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
