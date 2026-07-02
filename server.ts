@@ -1,7 +1,7 @@
 /**
- * Versione: 2.0.7
- * Data e Ora Modifica: 02/07/2026 15:53:56
- * Problema Risolto: Aggiunto l'import e l'inizializzazione di dotenv per caricare correttamente le variabili d'ambiente SMTP.
+ * Versione: 2.0.8
+ * Data e Ora Modifica: 02/07/2026 19:43:00
+ * Problema Risolto: Aggiunta della diagnostica di avvio per verificare la presenza delle variabili SMTP nei log di Render.
  */
 
 import express from 'express';
@@ -2051,6 +2051,22 @@ async function startServer() {
   // Use the standard http server instance to listen to both express routes and WS upgrade requests!
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[ChessServer] Running and listening on http://0.0.0.0:${PORT}`);
+    
+    // Verify and log SMTP configuration status on startup
+    const smtpHost = process.env.SMTP_HOST || adminDb.smtp?.host;
+    const smtpPort = process.env.SMTP_PORT || adminDb.smtp?.port;
+    const smtpUser = process.env.SMTP_USER || adminDb.smtp?.user;
+    const smtpPass = process.env.SMTP_PASS || adminDb.smtp?.pass;
+    if (smtpHost && smtpPort && smtpUser && smtpPass) {
+      addLog(`[SMTP_INIT] SMTP configurato correttamente. Host: ${smtpHost}:${smtpPort}, Utente: ${smtpUser}`, 'info');
+    } else {
+      const missing = [];
+      if (!smtpHost) missing.push('SMTP_HOST');
+      if (!smtpPort) missing.push('SMTP_PORT');
+      if (!smtpUser) missing.push('SMTP_USER');
+      if (!smtpPass) missing.push('SMTP_PASS');
+      addLog(`[SMTP_INIT] SMTP NON CONFIGURATO o incompleto. Variabili mancanti: ${missing.join(', ')}. L'invio delle email di verifica sarà bypassato (Mock Mode).`, 'warn');
+    }
   });
 }
 
