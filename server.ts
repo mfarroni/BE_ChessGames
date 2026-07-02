@@ -1,7 +1,7 @@
 /**
- * Versione: 1.0.2
- * Data e Ora Modifica: 02/07/2026 12:30:15
- * Problema Risolto: Implementazione invio email di verifica con dati utente registrato e funzionalità admin di newsletter SMTP selettiva.
+ * Versione: 2.0.0
+ * Data e Ora Modifica: 02/07/2026 14:00:52
+ * Problema Risolto: Implementazione log dettagliati di audit per tutti gli step della funzione SMTP nel pannello admin.
  */
 
 import express from 'express';
@@ -646,12 +646,22 @@ async function startServer() {
     const from = fromOverride || process.env.SMTP_FROM || adminDb.smtp?.from || '"Circolo degli Scacchi" <no-reply@circoloscacchi.it>';
 
     if (host && port && user && pass) {
+      addLog(`[SMTP_CONNECT] Avvio connessione al server SMTP: ${host}:${port} (TLS/SSL: ${parseInt(port) === 465 ? 'Attivo' : 'Inattivo'})`, 'info');
+      addLog(`[SMTP_AUTH] Autenticazione in corso per l'utente SMTP: ${user}`, 'info');
+      addLog(`[SMTP_DISPATCH] Preparazione invio email a: ${to} | Oggetto: "${subject}"`, 'info');
+
       try {
         const transporter = nodemailer.createTransport({
           host,
           port: parseInt(port),
           secure: parseInt(port) === 465,
-          auth: { user, pass }
+          auth: { user, pass },
+          connectionTimeout: 10000,
+          greetingTimeout: 10000,
+          socketTimeout: 15000,
+          tls: {
+            rejectUnauthorized: false
+          }
         });
         await transporter.sendMail({
           from,
@@ -659,14 +669,14 @@ async function startServer() {
           subject,
           html: htmlContent
         });
-        addLog(`[EMAIL INVIATA] Email "${subject}" inviata con successo a ${to}`, 'info');
+        addLog(`[SMTP_SUCCESS] Email inviata con successo a ${to} (Oggetto: "${subject}")`, 'info');
         return true;
       } catch (err: any) {
-        addLog(`[ERRORE SMTP] Impossibile inviare email a ${to} tramite SMTP: ${err.message}.`, 'warn');
+        addLog(`[SMTP_ERROR] Errore SMTP critico durante l'invio a ${to}: ${err.message}. Si consiglia di verificare host, porta e credenziali.`, 'error');
         return false;
       }
     } else {
-      addLog(`[MOCK EMAIL] Configurazione SMTP assente. Destinatario: ${to}, Oggetto: ${subject}.`, 'warn');
+      addLog(`[SMTP_BYPASS] Invio bypassato (Mock Mode). Configurazione SMTP assente nel database e nelle variabili d'ambiente. Destinatario: ${to}, Oggetto: "${subject}"`, 'warn');
       return false;
     }
   }
