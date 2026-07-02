@@ -1,7 +1,7 @@
 /**
- * Versione: 2.0.2
- * Data e Ora Modifica: 02/07/2026 14:21:25
- * Problema Risolto: Rimozione di chiavi non valide e commenti da vercel.json per correggere l'errore di validazione durante il deploy.
+ * Versione: 2.0.3
+ * Data e Ora Modifica: 02/07/2026 14:28:10
+ * Problema Risolto: Rimozione di chiavi non valide e commenti da entrambi i file vercel.json (root e frontend) per risolvere l'errore di deploy.
  */
 
 import express from 'express';
