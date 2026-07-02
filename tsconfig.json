@@ -1,4 +1,7 @@
 {
+  "_comment_version": "1.0.0",
+  "_comment_datetime": "02/07/2026 10:26:03 (Ora di Roma)",
+  "_comment_description": "Revisione e inserimento dell'orario di modifica attuale di Roma e versione 1.0.0 in tutti i file.",
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",

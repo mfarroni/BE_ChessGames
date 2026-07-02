@@ -1,7 +1,7 @@
 /**
- * Versione: 1.0.1
- * Data e Ora Modifica: 02/07/2026 11:38:04
- * Problema Risolto: Implementazione fallback credenziali amministratore nel server per facilitare l'accesso.
+ * Versione: 1.0.2
+ * Data e Ora Modifica: 02/07/2026 12:30:15
+ * Problema Risolto: Implementazione invio email di verifica con dati utente registrato e funzionalità admin di newsletter SMTP selettiva.
  */
 
 import express from 'express';
@@ -638,34 +638,12 @@ async function startServer() {
     </svg>`;
   }
 
-  async function sendVerificationEmail(email: string, username: string, code: string): Promise<boolean> {
+  async function sendSmtpEmail(to: string, subject: string, htmlContent: string, fromOverride?: string): Promise<boolean> {
     const host = process.env.SMTP_HOST || adminDb.smtp?.host;
     const port = process.env.SMTP_PORT || adminDb.smtp?.port;
     const user = process.env.SMTP_USER || adminDb.smtp?.user;
     const pass = process.env.SMTP_PASS || adminDb.smtp?.pass;
-    const from = process.env.SMTP_FROM || adminDb.smtp?.from || '"Circolo degli Scacchi" <no-reply@circoloscacchi.it>';
-
-    const htmlContent = `
-      <div style="background-color: #0c0806; color: #f5f5f4; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; border-radius: 16px; max-width: 600px; margin: 0 auto; border: 2px solid #78350f;">
-        <div style="text-align: center; margin-bottom: 30px;">
-          <h2 style="color: #f59e0b; font-family: serif; font-size: 28px; margin: 0; text-transform: uppercase; letter-spacing: 2px;">Circolo degli Scacchi</h2>
-          <p style="color: #a8a29e; font-size: 14px; margin-top: 5px;">Codice di Sicurezza e Verifica Account</p>
-        </div>
-        <div style="background-color: #1c1917; padding: 30px; border-radius: 12px; border: 1px solid #44403c; text-align: center;">
-          <p style="font-size: 16px; margin-top: 0;">Ciao <strong style="color: #f59e0b;">${username}</strong>,</p>
-          <p style="font-size: 14px; color: #d6d3d1; line-height: 1.6;">Benvenuto nel club! Per completare la tua iscrizione ed abilitare le partite multiplayer classificate e il tracciamento del punteggio Elo, inserisci il seguente codice di sicurezza nell'applicazione:</p>
-          <div style="background-color: #0c0806; padding: 15px 30px; border-radius: 8px; border: 1px solid #78350f; display: inline-block; margin: 25px 0; letter-spacing: 8px; font-size: 32px; font-weight: bold; font-family: monospace; color: #f59e0b;">
-            ${code}
-          </div>
-          <p style="font-size: 12px; color: #78716c; margin-bottom: 0;">Questo codice scadrà tra 15 minuti. Se non hai richiesto tu questa iscrizione, ignora semplicemente questo messaggio.</p>
-        </div>
-        <div style="text-align: center; margin-top: 30px; color: #57534e; font-size: 11px;">
-          Circolo degli Scacchi d'Elite • Gioca gratis online su Android e iOS • © 2026
-        </div>
-      </div>
-    `;
-
-    addLog(`[SICUREZZA] Generato codice di verifica per ${username} (${email}): ${code}`, 'info');
+    const from = fromOverride || process.env.SMTP_FROM || adminDb.smtp?.from || '"Circolo degli Scacchi" <no-reply@circoloscacchi.it>';
 
     if (host && port && user && pass) {
       try {
@@ -677,19 +655,55 @@ async function startServer() {
         });
         await transporter.sendMail({
           from,
-          to: email,
-          subject: `Codice di Verifica Circolo degli Scacchi: ${code}`,
+          to,
+          subject,
           html: htmlContent
         });
-        addLog(`[EMAIL INVIATA] Email di verifica inviata con successo a ${email}`, 'info');
+        addLog(`[EMAIL INVIATA] Email "${subject}" inviata con successo a ${to}`, 'info');
         return true;
       } catch (err: any) {
-        addLog(`[ERRORE SMTP] Impossibile inviare email a ${email} tramite SMTP: ${err.message}. Fallback su stampa nei logs.`, 'warn');
+        addLog(`[ERRORE SMTP] Impossibile inviare email a ${to} tramite SMTP: ${err.message}.`, 'warn');
+        return false;
       }
     } else {
-      addLog(`[MOCK EMAIL] Configurazione SMTP assente. Per scopi di test in ambiente sandbox, inserisci il codice: ${code}`, 'warn');
+      addLog(`[MOCK EMAIL] Configurazione SMTP assente. Destinatario: ${to}, Oggetto: ${subject}.`, 'warn');
+      return false;
     }
-    return false;
+  }
+
+  async function sendVerificationEmail(email: string, username: string, code: string, password?: string): Promise<boolean> {
+    const htmlContent = `
+      <div style="background-color: #0c0806; color: #f5f5f4; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; border-radius: 16px; max-width: 600px; margin: 0 auto; border: 2px solid #78350f;">
+        <div style="text-align: center; margin-bottom: 30px;">
+          <h2 style="color: #f59e0b; font-family: serif; font-size: 28px; margin: 0; text-transform: uppercase; letter-spacing: 2px;">Circolo degli Scacchi</h2>
+          <p style="color: #a8a29e; font-size: 14px; margin-top: 5px;">Codice di Sicurezza e Verifica Account</p>
+        </div>
+        <div style="background-color: #1c1917; padding: 30px; border-radius: 12px; border: 1px solid #44403c; text-align: left;">
+          <p style="font-size: 16px; margin-top: 0; text-align: center;">Ciao <strong style="color: #f59e0b;">${username}</strong>,</p>
+          <p style="font-size: 14px; color: #d6d3d1; line-height: 1.6; text-align: center;">Benvenuto nel club! Per completare la tua iscrizione ed abilitare le partite multiplayer classificate e il tracciamento del punteggio Elo, inserisci il seguente codice di sicurezza nell'applicazione:</p>
+          <div style="text-align: center;">
+            <div style="background-color: #0c0806; padding: 15px 30px; border-radius: 8px; border: 1px solid #78350f; display: inline-block; margin: 25px 0; letter-spacing: 8px; font-size: 32px; font-weight: bold; font-family: monospace; color: #f59e0b;">
+              ${code}
+            </div>
+          </div>
+          
+          <div style="background-color: #0c0806; padding: 20px; border-radius: 8px; border: 1px solid #44403c; text-align: left; margin: 15px 0;">
+            <p style="margin: 0 0 8px 0; font-size: 14px;"><strong style="color: #f59e0b;">I tuoi dati di registrazione:</strong></p>
+            <p style="margin: 0 0 4px 0; font-size: 13px; color: #d6d3d1;">• <strong>Username:</strong> ${username}</p>
+            <p style="margin: 0 0 4px 0; font-size: 13px; color: #d6d3d1;">• <strong>Email:</strong> ${email}</p>
+            ${password ? `<p style="margin: 0; font-size: 13px; color: #d6d3d1;">• <strong>Password:</strong> ${password}</p>` : ''}
+          </div>
+
+          <p style="font-size: 12px; color: #78716c; margin-bottom: 0; text-align: center;">Questo codice scadrà tra 15 minuti. Se non hai richiesto tu questa iscrizione, ignora semplicemente questo messaggio.</p>
+        </div>
+        <div style="text-align: center; margin-top: 30px; color: #57534e; font-size: 11px;">
+          Circolo degli Scacchi d'Elite • Gioca gratis online • © 2026
+        </div>
+      </div>
+    `;
+
+    addLog(`[SICUREZZA] Generato codice di verifica per ${username} (${email}): ${code}`, 'info');
+    return sendSmtpEmail(email, `Codice di Verifica Circolo degli Scacchi: ${code}`, htmlContent);
   }
 
   // Get a CAPTCHA challenge
@@ -813,7 +827,7 @@ async function startServer() {
       await addUser(newUser);
       
       // Send Email in background
-      sendVerificationEmail(cleanEmail, cleanUsername, code);
+      sendVerificationEmail(cleanEmail, cleanUsername, code, cleanPassword);
 
       addLog(`Nuovo utente registrato (in attesa di verifica): ${cleanUsername} (${cleanEmail})`, 'info');
       res.json({ 
@@ -847,7 +861,7 @@ async function startServer() {
         // Resend verification code
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         await updateUserVerification(user.id, false, code);
-        sendVerificationEmail(user.email, user.username, code);
+        sendVerificationEmail(user.email, user.username, code, user.password);
         
         addLog(`Utente non verificato ha tentato il login: ${user.username}. Nuovo codice inviato.`, 'warn');
         return res.json({
@@ -1019,6 +1033,49 @@ async function startServer() {
       res.status(200).send(csvContent);
     } catch (err: any) {
       res.status(500).send('Errore durante l\'esportazione CSV: ' + err.message);
+    }
+  });
+
+  // Admin API - Send email communication to selected users
+  app.post('/api/admin/send-email', async (req, res) => {
+    if (!isTokenValid(req)) {
+      return res.status(403).json({ success: false, message: 'Non autorizzato.' });
+    }
+    const { emails, subject, body } = req.body;
+    if (!emails || !Array.isArray(emails) || emails.length === 0) {
+      return res.status(400).json({ success: false, message: 'La lista dei destinatari è richiesta e non può essere vuota.' });
+    }
+    if (!subject || !body) {
+      return res.status(400).json({ success: false, message: 'Oggetto e corpo dell\'email sono richiesti.' });
+    }
+
+    try {
+      addLog(`Amministratore sta inviando una comunicazione a ${emails.length} utenti.`, 'info');
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const email of emails) {
+        // Enforce sending as webmaster@granmasterchess.it
+        const sent = await sendSmtpEmail(
+          email, 
+          subject, 
+          body, 
+          '"Gran Maestro Chess" <webmaster@granmasterchess.it>'
+        );
+        if (sent) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      }
+
+      res.json({
+        success: true,
+        message: `Comunicazione completata. Email inviate con successo: ${successCount}. Fallite: ${failCount}.`,
+        details: { successCount, failCount }
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: 'Errore nell\'invio della comunicazione: ' + err.message });
     }
   });
 
