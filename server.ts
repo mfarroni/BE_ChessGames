@@ -1,7 +1,7 @@
 /**
- * Versione: 2.0.8
- * Data e Ora Modifica: 02/07/2026 19:43:00
- * Problema Risolto: Aggiunta della diagnostica di avvio per verificare la presenza delle variabili SMTP nei log di Render.
+ * Versione: 2.0.9
+ * Data e Ora Modifica: 03/07/2026 12:00:00
+ * Problema Risolto: Sostituzione dell'invio email via SMTP/nodemailer con l'API transazionale di Brevo (@getbrevo/brevo).
  */
 
 import express from 'express';
@@ -13,7 +13,7 @@ import fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Player, ChessGame, LeaderboardEntry, WsMessage } from './types.js';
 import pg from 'pg';
-import nodemailer from 'nodemailer';
+import * as SibApiV3Sdk from '@getbrevo/brevo';
 const { Pool } = pg;
 
 
@@ -92,12 +92,10 @@ let adminDb = {
     password: 'chessadmin2026'
   },
   databaseUrl: '',
-  smtp: {
-    host: '',
-    port: '',
-    user: '',
-    pass: '',
-    from: ''
+  brevo: {
+    apiKey: '',
+    senderEmail: '',
+    senderName: ''
   },
   musicTracks: [] as { id: string; name: string; url: string; isLocal?: boolean }[],
   users: [] as DbUser[]
@@ -112,7 +110,7 @@ try {
       ...adminDb,
       ...loaded,
       admin: { ...adminDb.admin, ...loaded.admin },
-      smtp: { ...adminDb.smtp, ...loaded.smtp }
+      brevo: { ...adminDb.brevo, ...loaded.brevo }
     };
     if (!adminDb.users) {
       adminDb.users = [];
@@ -640,45 +638,33 @@ async function startServer() {
     </svg>`;
   }
 
-  async function sendSmtpEmail(to: string, subject: string, htmlContent: string, fromOverride?: string): Promise<boolean> {
-    const host = process.env.SMTP_HOST || adminDb.smtp?.host;
-    const port = process.env.SMTP_PORT || adminDb.smtp?.port;
-    const user = process.env.SMTP_USER || adminDb.smtp?.user;
-    const pass = process.env.SMTP_PASS || adminDb.smtp?.pass;
-    const from = fromOverride || process.env.SMTP_FROM || adminDb.smtp?.from || '"Circolo degli Scacchi" <no-reply@circoloscacchi.it>';
+  async function sendEmailViaBrevo({ to, toName, subject, htmlContent, senderNameOverride }: { to: string; toName?: string; subject: string; htmlContent: string; senderNameOverride?: string }): Promise<boolean> {
+    const apiKey = adminDb.brevo?.apiKey || process.env.BREVO_API_KEY;
+    const senderEmail = adminDb.brevo?.senderEmail || process.env.BREVO_SENDER_EMAIL;
+    const senderName = senderNameOverride || adminDb.brevo?.senderName || process.env.BREVO_SENDER_NAME || 'Circolo degli Scacchi';
 
-    if (host && port && user && pass) {
-      addLog(`[SMTP_CONNECT] Avvio connessione al server SMTP: ${host}:${port} (TLS/SSL: ${parseInt(port) === 465 ? 'Attivo' : 'Inattivo'})`, 'info');
-      addLog(`[SMTP_AUTH] Autenticazione in corso per l'utente SMTP: ${user}`, 'info');
-      addLog(`[SMTP_DISPATCH] Preparazione invio email a: ${to} | Oggetto: "${subject}"`, 'info');
+    if (apiKey && senderEmail) {
+      addLog(`[BREVO_DISPATCH] Preparazione invio email tramite Brevo a: ${to} | Oggetto: "${subject}"`, 'info');
 
       try {
-        const transporter = nodemailer.createTransport({
-          host,
-          port: parseInt(port),
-          secure: parseInt(port) === 465,
-          auth: { user, pass },
-          connectionTimeout: 10000,
-          greetingTimeout: 10000,
-          socketTimeout: 15000,
-          tls: {
-            rejectUnauthorized: false
-          }
-        });
-        await transporter.sendMail({
-          from,
-          to,
-          subject,
-          html: htmlContent
-        });
-        addLog(`[SMTP_SUCCESS] Email inviata con successo a ${to} (Oggetto: "${subject}")`, 'info');
+        const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
+        apiInstance.setApiKey(SibApiV3Sdk.TransactionalEmailsApiApiKeys.apiKey, apiKey);
+
+        const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+        sendSmtpEmail.subject = subject;
+        sendSmtpEmail.htmlContent = htmlContent;
+        sendSmtpEmail.sender = { email: senderEmail, name: senderName };
+        sendSmtpEmail.to = [{ email: to, name: toName || to }];
+
+        await apiInstance.sendTransacEmail(sendSmtpEmail);
+        addLog(`[BREVO_SUCCESS] Email inviata con successo a ${to} (Oggetto: "${subject}")`, 'info');
         return true;
       } catch (err: any) {
-        addLog(`[SMTP_ERROR] Errore SMTP critico durante l'invio a ${to}: ${err.message}. Si consiglia di verificare host, porta e credenziali.`, 'error');
+        addLog(`[BREVO_ERROR] Errore critico durante l'invio a ${to} tramite Brevo: ${err.message}. Si consiglia di verificare la API key e il mittente configurato.`, 'error');
         return false;
       }
     } else {
-      addLog(`[SMTP_BYPASS] Invio bypassato (Mock Mode). Configurazione SMTP assente nel database e nelle variabili d'ambiente. Destinatario: ${to}, Oggetto: "${subject}"`, 'warn');
+      addLog(`[BREVO_MOCK] Invio bypassato (Mock Mode). Configurazione Brevo assente nel database e nelle variabili d'ambiente. Destinatario: ${to}, Oggetto: "${subject}", Contenuto: ${htmlContent}`, 'warn');
       return false;
     }
   }
@@ -715,7 +701,12 @@ async function startServer() {
     `;
 
     addLog(`[SICUREZZA] Generato codice di verifica per ${username} (${email}): ${code}`, 'info');
-    return sendSmtpEmail(email, `Codice di Verifica Circolo degli Scacchi: ${code}`, htmlContent);
+    return sendEmailViaBrevo({
+      to: email,
+      toName: username,
+      subject: `Codice di Verifica Circolo degli Scacchi: ${code}`,
+      htmlContent
+    });
   }
 
   // Get a CAPTCHA challenge
@@ -1074,13 +1065,13 @@ async function startServer() {
       let failCount = 0;
 
       for (const email of emails) {
-        // Enforce sending as webmaster@granmasterchess.it
-        const sent = await sendSmtpEmail(
-          email, 
-          subject, 
-          body, 
-          '"Gran Maestro Chess" <webmaster@granmasterchess.it>'
-        );
+        // Enforce sending as "Gran Maestro Chess"
+        const sent = await sendEmailViaBrevo({
+          to: email,
+          subject,
+          htmlContent: body,
+          senderNameOverride: 'Gran Maestro Chess'
+        });
         if (sent) {
           successCount++;
         } else {
@@ -1230,43 +1221,52 @@ async function startServer() {
     });
   });
 
-  // Admin Config - Get SMTP configuration
-  app.get('/api/admin/config/smtp', (req, res) => {
+  // Admin Config - Get Brevo configuration
+  app.get('/api/admin/config/brevo', (req, res) => {
     if (!isTokenValid(req)) {
       return res.status(403).json({ success: false, message: 'Non autorizzato.' });
     }
-    const smtp = adminDb.smtp || { host: '', port: '', user: '', pass: '', from: '' };
+    const brevo = adminDb.brevo || { apiKey: '', senderEmail: '', senderName: '' };
+    const apiKey = brevo.apiKey || process.env.BREVO_API_KEY || '';
+    const configured = !!apiKey;
+
+    // Mask API key for safety: show only first 8 and last 4 characters
+    let apiKeyMasked: string | null = null;
+    if (apiKey) {
+      if (apiKey.length > 12) {
+        apiKeyMasked = `${apiKey.slice(0, 8)}${'•'.repeat(8)}${apiKey.slice(-4)}`;
+      } else {
+        apiKeyMasked = '•'.repeat(apiKey.length);
+      }
+    }
+
     res.json({
       success: true,
-      smtp: {
-        host: smtp.host || '',
-        port: smtp.port || '',
-        user: smtp.user || '',
-        pass: smtp.pass || '',
-        from: smtp.from || ''
-      },
-      isEnvVar: !!(process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS)
+      config: {
+        configured,
+        apiKeyMasked,
+        senderEmail: brevo.senderEmail || process.env.BREVO_SENDER_EMAIL || '',
+        senderName: brevo.senderName || process.env.BREVO_SENDER_NAME || ''
+      }
     });
   });
 
-  // Admin Config - Update SMTP configuration
-  app.post('/api/admin/config/smtp', (req, res) => {
+  // Admin Config - Update Brevo configuration
+  app.post('/api/admin/config/brevo', (req, res) => {
     if (!isTokenValid(req)) {
       return res.status(403).json({ success: false, message: 'Non autorizzato.' });
     }
-    const { host, port, user, pass, from } = req.body;
-    
-    adminDb.smtp = {
-      host: (host || '').trim(),
-      port: (port || '').trim(),
-      user: (user || '').trim(),
-      pass: (pass || '').trim(),
-      from: (from || '').trim()
+    const { apiKey, senderEmail, senderName } = req.body;
+
+    adminDb.brevo = {
+      apiKey: (apiKey && apiKey.trim() !== '') ? apiKey.trim() : (adminDb.brevo?.apiKey || ''),
+      senderEmail: (senderEmail || '').trim(),
+      senderName: (senderName || '').trim()
     };
-    
+
     saveAdminDb();
-    addLog(`[CONFIG SMTP] Configurazione SMTP aggiornata dall'amministratore`, 'info');
-    res.json({ success: true, message: 'Configurazione SMTP salvata con successo!' });
+    addLog(`[CONFIG BREVO] Configurazione Brevo aggiornata dall'amministratore`, 'info');
+    res.json({ success: true, message: 'Configurazione Brevo salvata con successo!' });
   });
 
   app.post('/api/admin/music', async (req, res) => {
@@ -2052,20 +2052,16 @@ async function startServer() {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[ChessServer] Running and listening on http://0.0.0.0:${PORT}`);
     
-    // Verify and log SMTP configuration status on startup
-    const smtpHost = process.env.SMTP_HOST || adminDb.smtp?.host;
-    const smtpPort = process.env.SMTP_PORT || adminDb.smtp?.port;
-    const smtpUser = process.env.SMTP_USER || adminDb.smtp?.user;
-    const smtpPass = process.env.SMTP_PASS || adminDb.smtp?.pass;
-    if (smtpHost && smtpPort && smtpUser && smtpPass) {
-      addLog(`[SMTP_INIT] SMTP configurato correttamente. Host: ${smtpHost}:${smtpPort}, Utente: ${smtpUser}`, 'info');
+    // Verify and log Brevo configuration status on startup
+    const brevoApiKey = adminDb.brevo?.apiKey || process.env.BREVO_API_KEY;
+    const brevoSenderEmail = adminDb.brevo?.senderEmail || process.env.BREVO_SENDER_EMAIL;
+    if (brevoApiKey && brevoSenderEmail) {
+      addLog(`[BREVO_INIT] Brevo configurato correttamente. Mittente: ${brevoSenderEmail}`, 'info');
     } else {
       const missing = [];
-      if (!smtpHost) missing.push('SMTP_HOST');
-      if (!smtpPort) missing.push('SMTP_PORT');
-      if (!smtpUser) missing.push('SMTP_USER');
-      if (!smtpPass) missing.push('SMTP_PASS');
-      addLog(`[SMTP_INIT] SMTP NON CONFIGURATO o incompleto. Variabili mancanti: ${missing.join(', ')}. L'invio delle email di verifica sarà bypassato (Mock Mode).`, 'warn');
+      if (!brevoApiKey) missing.push('BREVO_API_KEY');
+      if (!brevoSenderEmail) missing.push('BREVO_SENDER_EMAIL');
+      addLog(`[BREVO_INIT] Brevo NON CONFIGURATO o incompleto. Variabili mancanti: ${missing.join(', ')}. L'invio delle email di verifica sarà bypassato (Mock Mode).`, 'warn');
     }
   });
 }
