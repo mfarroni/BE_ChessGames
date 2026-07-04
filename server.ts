@@ -1,7 +1,7 @@
 /**
- * Versione: 2.0.9
- * Data e Ora Modifica: 03/07/2026 12:00:00
- * Problema Risolto: Sostituzione dell'invio email via SMTP/nodemailer con l'API transazionale di Brevo (@getbrevo/brevo).
+ * Versione: 2.1.0
+ * Data e Ora Modifica: 04/07/2026 12:00:00 (Ora di Roma)
+ * Problema Risolto: Aggiunta la persistenza del consenso privacy in Registrazione (colonne privacy_accepted_at/privacy_policy_version su Postgres e campi equivalenti nel fallback JSON), con validazione obbligatoria lato server prima della creazione dell'utente.
  */
 
 import express from 'express';
@@ -52,6 +52,8 @@ interface DbUser {
   createdAt?: string;
   isVerified?: boolean;
   verificationCode?: string;
+  privacyAcceptedAt?: string;
+  privacyPolicyVersion?: string;
 }
 
 // Load/save leaderboard from a local file so ratings are persistent
@@ -206,6 +208,8 @@ async function initPgDb() {
       try {
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code VARCHAR(10);`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_accepted_at TIMESTAMP;`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_policy_version VARCHAR(20);`);
       } catch (colErr: any) {
         addLog('Nota: Colonne di verifica già presenti o errore innocuo: ' + colErr.message, 'info');
       }
@@ -224,7 +228,7 @@ async function getUsers(): Promise<DbUser[]> {
   const pool = getPgPool();
   if (pool) {
     try {
-      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt" FROM users ORDER BY username ASC');
+      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion" FROM users ORDER BY username ASC');
       return res.rows;
     } catch (err: any) {
       addLog('Errore durante la lettura degli utenti da PostgreSQL, provo fallback locale: ' + err.message, 'error');
@@ -238,7 +242,7 @@ async function getUserByUsername(username: string): Promise<DbUser | null> {
   const pool = getPgPool();
   if (pool) {
     try {
-      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt" FROM users WHERE LOWER(username) = LOWER($1)', [username.trim()]);
+      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion" FROM users WHERE LOWER(username) = LOWER($1)', [username.trim()]);
       if (res.rows.length > 0) return res.rows[0];
       return null;
     } catch (err: any) {
@@ -255,8 +259,8 @@ async function addUser(user: DbUser): Promise<void> {
   if (pool) {
     try {
       await pool.query(
-        'INSERT INTO users (id, username, email, password, rating, wins, losses, is_verified, verification_code) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
-        [user.id, user.username, user.email, user.password || '', user.rating || 1500, user.wins || 0, user.losses || 0, user.isVerified || false, user.verificationCode || '']
+        'INSERT INTO users (id, username, email, password, rating, wins, losses, is_verified, verification_code, privacy_accepted_at, privacy_policy_version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)',
+        [user.id, user.username, user.email, user.password || '', user.rating || 1500, user.wins || 0, user.losses || 0, user.isVerified || false, user.verificationCode || '', user.privacyAcceptedAt || null, user.privacyPolicyVersion || null]
       );
       addLog(`Utente inserito in PostgreSQL con successo: ${user.username}`);
       return;
@@ -781,6 +785,10 @@ async function startServer() {
       return res.status(400).json({ success: false, message: 'Tutti i campi (username, email, password, captcha) sono obbligatori.' });
     }
 
+    if (req.body.privacyAccepted !== true) {
+      return res.status(400).json({ success: false, message: 'È necessario accettare l\'informativa sulla privacy per registrarsi.' });
+    }
+
     // Verify Captcha
     const storedCaptcha = activeCaptchas[captchaId];
     if (!storedCaptcha || storedCaptcha.expiresAt < Date.now()) {
@@ -824,7 +832,9 @@ async function startServer() {
         wins: 0,
         losses: 0,
         isVerified: false,
-        verificationCode: code
+        verificationCode: code,
+        privacyAcceptedAt: new Date().toISOString(),
+        privacyPolicyVersion: req.body.privacyPolicyVersion || 'unknown'
       };
 
       await addUser(newUser);
