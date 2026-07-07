@@ -1,7 +1,7 @@
 /**
- * Versione: 2.1.0
- * Data e Ora Modifica: 04/07/2026 12:00:00 (Ora di Roma)
- * Problema Risolto: Aggiunta la persistenza del consenso privacy in Registrazione (colonne privacy_accepted_at/privacy_policy_version su Postgres e campi equivalenti nel fallback JSON), con validazione obbligatoria lato server prima della creazione dell'utente.
+ * Versione: 2.2.0
+ * Data e Ora Modifica: 07/07/2026 13:15:00 (Ora di Roma)
+ * Problema Risolto: Rimozione degli endpoint e della logica della musica d'atmosfera (/api/music, /api/music/upload, /api/music/:id, /api/admin/music[/:id]), degli helper getTracks/addTrack/deleteTrack, della tabella music_tracks (CREATE rimosso, non droppata), del serving statico /uploads e del campo musicTracks in admin_db. Nessuna altra funzionalità toccata.
  */
 
 import express from 'express';
@@ -99,7 +99,6 @@ let adminDb = {
     senderEmail: '',
     senderName: ''
   },
-  musicTracks: [] as { id: string; name: string; url: string; isLocal?: boolean }[],
   users: [] as DbUser[]
 };
 
@@ -179,16 +178,6 @@ async function initPgDb() {
   try {
     const client = await pool.connect();
     try {
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS music_tracks (
-          id VARCHAR(50) PRIMARY KEY,
-          name VARCHAR(255) NOT NULL,
-          url TEXT NOT NULL,
-          is_local BOOLEAN DEFAULT FALSE
-        );
-      `);
-      addLog('Tabella music_tracks verificata/creata in PostgreSQL.');
-
       await client.query(`
         CREATE TABLE IF NOT EXISTS users (
           id VARCHAR(50) PRIMARY KEY,
@@ -402,60 +391,6 @@ async function updateUserStatsByUsername(username: string, rating: number, wins:
   }
 }
 
-// Database abstractions to read/write tracks
-async function getTracks(): Promise<{ id: string; name: string; url: string; isLocal?: boolean }[]> {
-  const pool = getPgPool();
-  if (pool) {
-    try {
-      const res = await pool.query('SELECT id, name, url, is_local as "isLocal" FROM music_tracks ORDER BY id DESC');
-      return res.rows;
-    } catch (err) {
-      console.error('Failed to query tracks from PostgreSQL, falling back to local database:', err);
-    }
-  }
-  return adminDb.musicTracks || [];
-}
-
-async function addTrack(track: { id: string; name: string; url: string; isLocal?: boolean }): Promise<void> {
-  const pool = getPgPool();
-  if (pool) {
-    try {
-      await pool.query(
-        'INSERT INTO music_tracks (id, name, url, is_local) VALUES ($1, $2, $3, $4)',
-        [track.id, track.name, track.url, track.isLocal || false]
-      );
-      return;
-    } catch (err) {
-      console.error('Failed to insert track into PostgreSQL:', err);
-      throw err;
-    }
-  }
-  
-  if (!adminDb.musicTracks) adminDb.musicTracks = [];
-  adminDb.musicTracks.push(track);
-  saveAdminDb();
-}
-
-async function deleteTrack(id: string): Promise<boolean> {
-  const pool = getPgPool();
-  if (pool) {
-    try {
-      const res = await pool.query('DELETE FROM music_tracks WHERE id = $1', [id]);
-      return (res.rowCount ?? 0) > 0;
-    } catch (err) {
-      console.error('Failed to delete track from PostgreSQL:', err);
-      throw err;
-    }
-  }
-
-  if (!adminDb.musicTracks) adminDb.musicTracks = [];
-  const trackIndex = adminDb.musicTracks.findIndex(t => t.id === id);
-  if (trackIndex === -1) return false;
-  adminDb.musicTracks.splice(trackIndex, 1);
-  saveAdminDb();
-  return true;
-}
-
 let adminSessionToken: string | null = null;
 
 const isTokenValid = (req: express.Request): boolean => {
@@ -481,115 +416,12 @@ async function startServer() {
   // Initialize PostgreSQL schema if DATABASE_URL is present
   await initPgDb();
 
-  // Configure larger limits for base64 file uploads
+  // Configure body size limits for JSON payloads
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-  // Ensure uploads directory exists and is served statically
-  const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
-  if (!fs.existsSync(UPLOADS_DIR)) {
-    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-  }
-  app.use('/uploads', express.static(UPLOADS_DIR));
-
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', onlinePlayersCount: Object.keys(players).length });
-  });
-
-  // Music REST API Route - fetches tracks from PostgreSQL or local database
-  app.get('/api/music', async (req, res) => {
-    try {
-      const currentTracks = await getTracks();
-      res.json({ success: true, tracks: currentTracks });
-    } catch (err) {
-      console.error('Error fetching tracks:', err);
-      res.status(500).json({ success: false, message: 'Errore nel caricamento delle musiche.' });
-    }
-  });
-
-  // Admin File Upload endpoint (Secure - checks token)
-  app.post('/api/music/upload', async (req, res) => {
-    if (!isTokenValid(req)) {
-      return res.status(403).json({ success: false, message: 'Non autorizzato. Solo gli amministratori possono caricare file.' });
-    }
-    const { name, base64 } = req.body;
-    if (!name || !base64) {
-      return res.status(400).json({ success: false, message: 'Nome e file audio base64 sono obbligatori.' });
-    }
-
-    try {
-      const currentTracks = await getTracks();
-      if (currentTracks.length >= 5) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Limite massimo di 5 tracce audio raggiunto. Per favore, elimina una traccia esistente prima di caricarne una nuova.' 
-        });
-      }
-
-      const commaIndex = base64.indexOf(',');
-      const base64Data = commaIndex !== -1 ? base64.substring(commaIndex + 1) : base64;
-      const buffer = Buffer.from(base64Data, 'base64');
-
-      // Sanitise and generate safe filename
-      const cleanName = name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-      const uniqueFilename = `${Date.now()}_${cleanName}`;
-      const filePath = path.join(UPLOADS_DIR, uniqueFilename);
-
-      fs.writeFileSync(filePath, buffer);
-
-      const trackUrl = `/uploads/${uniqueFilename}`;
-      const newTrack = {
-        id: `local_${Math.random().toString(36).substring(2, 9)}`,
-        name: name.replace(/\.mp3$/i, '').trim(),
-        url: trackUrl,
-        isLocal: true
-      };
-
-      await addTrack(newTrack);
-
-      res.json({ success: true, track: newTrack });
-    } catch (err: any) {
-      console.error('File write error:', err);
-      res.status(500).json({ success: false, message: 'Impossibile salvare il file MP3: ' + err.message });
-    }
-  });
-
-  // Admin Delete endpoint (Secure - checks token)
-  app.delete('/api/music/:id', async (req, res) => {
-    if (!isTokenValid(req)) {
-      return res.status(403).json({ success: false, message: 'Non autorizzato. Solo gli amministratori possono eliminare file.' });
-    }
-    const { id } = req.params;
-    try {
-      const currentTracks = await getTracks();
-      const track = currentTracks.find(t => t.id === id);
-      if (!track) {
-        return res.status(404).json({ success: false, message: 'Traccia non trovata.' });
-      }
-
-      // Clean up physical file if it resides in /uploads
-      if (track.url.startsWith('/uploads/')) {
-         const filename = path.basename(track.url);
-        const filePath = path.join(UPLOADS_DIR, filename);
-        if (fs.existsSync(filePath)) {
-          try {
-            fs.unlinkSync(filePath);
-          } catch (err) {
-            console.error('Failed to delete file:', filePath, err);
-          }
-        }
-      }
-
-      const deleted = await deleteTrack(id);
-      if (deleted) {
-        res.json({ success: true, message: 'Traccia eliminata con successo.' });
-      } else {
-        res.status(400).json({ success: false, message: 'Errore durante l\'eliminazione della traccia.' });
-      }
-    } catch (err: any) {
-      console.error('Error deleting track:', err);
-      res.status(500).json({ success: false, message: 'Errore durante l\'eliminazione: ' + err.message });
-    }
   });
 
   // CAPTCHA Storage in memory
@@ -1173,15 +1005,6 @@ async function startServer() {
       const client = await testPool.connect();
       try {
         await client.query('SELECT NOW()');
-        // Initialize schema
-        await client.query(`
-          CREATE TABLE IF NOT EXISTS music_tracks (
-            id VARCHAR(50) PRIMARY KEY,
-            name VARCHAR(255) NOT NULL,
-            url TEXT NOT NULL,
-            is_local BOOLEAN DEFAULT FALSE
-          );
-        `);
       } finally {
         client.release();
         await testPool.end();
@@ -1277,69 +1100,6 @@ async function startServer() {
     saveAdminDb();
     addLog(`[CONFIG BREVO] Configurazione Brevo aggiornata dall'amministratore`, 'info');
     res.json({ success: true, message: 'Configurazione Brevo salvata con successo!' });
-  });
-
-  app.post('/api/admin/music', async (req, res) => {
-    if (!isTokenValid(req)) {
-      return res.status(403).json({ success: false, message: 'Non autorizzato.' });
-    }
-    const { name, url } = req.body;
-    if (!name || !url || name.trim() === '' || url.trim() === '') {
-      return res.status(400).json({ success: false, message: 'Il nome e l\'URL della musica sono obbligatori.' });
-    }
-    try {
-      const currentTracks = await getTracks();
-      if (currentTracks.length >= 5) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Limite massimo di 5 tracce raggiunto. Elimina una traccia prima di aggiungerne una nuova.' 
-        });
-      }
-      const newTrack = {
-        id: Math.random().toString(36).substring(2, 9),
-        name: name.trim(),
-        url: url.trim()
-      };
-      await addTrack(newTrack);
-      res.json({ success: true, track: newTrack });
-    } catch (err: any) {
-      res.status(500).json({ success: false, message: 'Errore nel salvataggio della traccia: ' + err.message });
-    }
-  });
-
-  app.delete('/api/admin/music/:id', async (req, res) => {
-    if (!isTokenValid(req)) {
-      return res.status(403).json({ success: false, message: 'Non autorizzato.' });
-    }
-    const { id } = req.params;
-    try {
-      const currentTracks = await getTracks();
-      const track = currentTracks.find(t => t.id === id);
-      if (!track) {
-        return res.status(404).json({ success: false, message: 'Musica non trovata.' });
-      }
-
-      if (track.url.startsWith('/uploads/')) {
-        const filename = path.basename(track.url);
-        const filePath = path.join(UPLOADS_DIR, filename);
-        if (fs.existsSync(filePath)) {
-          try {
-            fs.unlinkSync(filePath);
-          } catch (err) {
-            console.error('Failed to delete file:', filePath, err);
-          }
-        }
-      }
-
-      const deleted = await deleteTrack(id);
-      if (deleted) {
-        res.json({ success: true, message: 'Musica d\'atmosfera eliminata con successo.' });
-      } else {
-        res.status(400).json({ success: false, message: 'Errore nell\'eliminazione della traccia.' });
-      }
-    } catch (err: any) {
-      res.status(500).json({ success: false, message: 'Errore: ' + err.message });
-    }
   });
 
   // Create the standard HTTP server
