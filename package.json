@@ -1,9 +1,9 @@
 {
-  "_comment_version": "1.0.2",
-  "_comment_datetime": "03/07/2026 12:00:00 (Ora di Roma)",
-  "_comment_description": "Sostituzione dell'invio email via SMTP/nodemailer con l'API transazionale di Brevo (@getbrevo/brevo) nel backend.",
+  "_comment_version": "1.0.3",
+  "_comment_datetime": "07/07/2026 15:30:00 (Ora di Roma)",
+  "_comment_description": "Aggiunta la dipendenza express-rate-limit per il rate limiting del login amministratore.",
   "name": "chess-backend",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "main": "server.ts",
   "type": "module",
@@ -15,6 +15,7 @@
   "dependencies": {
     "@getbrevo/brevo": "^2.2.0",
     "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
     "pg": "^8.22.0",
     "ws": "^8.21.0",
     "tsx": "^4.21.0",

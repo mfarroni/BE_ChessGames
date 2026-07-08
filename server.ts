@@ -1,7 +1,7 @@
 /**
- * Versione: 2.2.0
- * Data e Ora Modifica: 07/07/2026 13:15:00 (Ora di Roma)
- * Problema Risolto: Rimozione degli endpoint e della logica della musica d'atmosfera (/api/music, /api/music/upload, /api/music/:id, /api/admin/music[/:id]), degli helper getTracks/addTrack/deleteTrack, della tabella music_tracks (CREATE rimosso, non droppata), del serving statico /uploads e del campo musicTracks in admin_db. Nessuna altra funzionalità toccata.
+ * Versione: 2.3.0
+ * Data e Ora Modifica: 07/07/2026 15:30:00 (Ora di Roma)
+ * Problema Risolto: Messa in sicurezza del login amministratore (/api/admin/login): rimosse le credenziali di fallback hardcoded, credenziali risolte solo da adminDb.admin (via env ADMIN_USERNAME/ADMIN_PASSWORD o password casuale generata all'avvio), messaggio d'errore generico (anti username-enumeration) e rate limiting (5 tentativi/15min per IP con express-rate-limit).
  */
 
 import express from 'express';
@@ -14,6 +14,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { Player, ChessGame, LeaderboardEntry, WsMessage } from './types.js';
 import pg from 'pg';
 import * as SibApiV3Sdk from '@getbrevo/brevo';
+import rateLimit from 'express-rate-limit';
+import { randomBytes } from 'node:crypto';
 const { Pool } = pg;
 
 
@@ -91,7 +93,9 @@ function saveLeaderboard() {
 let adminDb = {
   admin: {
     username: 'admin',
-    password: 'chessadmin2026'
+    // Nessuna password di default nota: viene risolta all'avvio da
+    // ensureAdminCredentials() (variabili d'ambiente o generazione casuale).
+    password: ''
   },
   databaseUrl: '',
   brevo: {
@@ -130,6 +134,46 @@ function saveAdminDb() {
     console.error('Failed to save admin database:', e);
   }
 }
+
+/**
+ * Risolve le credenziali amministratore all'avvio, senza usare credenziali di
+ * default note. Priorità: 1) variabili d'ambiente ADMIN_USERNAME/ADMIN_PASSWORD
+ * (consigliato in produzione); 2) valore già persistito in admin_db.json;
+ * 3) generazione di una password casuale forte, persistita e stampata UNA VOLTA
+ * solo sullo stdout del server (mai in una risposta HTTP né nei log applicativi
+ * esposti da /api/admin/logs).
+ */
+function ensureAdminCredentials() {
+  const envUser = (process.env.ADMIN_USERNAME || '').trim();
+  const envPass = (process.env.ADMIN_PASSWORD || '').trim();
+  if (envUser) adminDb.admin.username = envUser;
+  if (envPass) adminDb.admin.password = envPass;
+
+  if (!adminDb.admin.username || !adminDb.admin.username.trim()) {
+    adminDb.admin.username = 'admin';
+  }
+
+  if (!adminDb.admin.password || !adminDb.admin.password.trim()) {
+    const generated = randomBytes(18).toString('base64url');
+    adminDb.admin.password = generated;
+    saveAdminDb();
+    // Stampa SOLO su stdout del server: non passa da addLog (che alimenta
+    // /api/admin/logs) e non viene mai restituita via HTTP.
+    console.warn(
+      `\n============================================================\n` +
+      `[ADMIN_INIT] Nessuna password amministratore configurata.\n` +
+      `È stata generata una password TEMPORANEA per l'utente "${adminDb.admin.username}":\n\n` +
+      `    ${generated}\n\n` +
+      `Imposta ADMIN_PASSWORD (e opzionalmente ADMIN_USERNAME) come variabile\n` +
+      `d'ambiente per una password stabile, oppure cambiala dal pannello admin.\n` +
+      `Questo messaggio non verrà più mostrato una volta configurata una password.\n` +
+      `============================================================\n`
+    );
+    addLog(`[ADMIN_INIT] Password amministratore non configurata: generata una password temporanea (visibile solo nello stdout del server).`, 'warn');
+  }
+}
+
+ensureAdminCredentials();
 
 // PostgreSQL Connection Pool management (lazily initialized)
 let pgPool: any = null;
@@ -400,6 +444,19 @@ const isTokenValid = (req: express.Request): boolean => {
 
 async function startServer() {
   const app = express();
+  // Su Render l'app è dietro un proxy: senza questo, req.ip sarebbe l'IP del
+  // proxy e il rate limiting diventerebbe globale invece che per-client.
+  app.set('trust proxy', 1);
+
+  // Rate limiter dedicato al login admin: max 5 tentativi ogni 15 minuti per IP.
+  const adminLoginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'Troppi tentativi di accesso. Riprova più tardi.' }
+  });
+
   const PORT = Number(process.env.PORT) || 3000;
 
   // Custom CORS middleware to allow requests from Vercel / external clients
@@ -931,35 +988,28 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/login', (req, res) => {
+  app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
     const { username, password } = req.body;
-    
+
     const cleanUsername = (username || '').trim().toLowerCase();
     const cleanPassword = (password || '').trim();
 
     const dbAdminUser = (adminDb.admin.username || '').trim().toLowerCase();
     const dbAdminPass = (adminDb.admin.password || '').trim();
 
-    const isPrimaryValid = cleanUsername === dbAdminUser && cleanPassword === dbAdminPass;
-    const isFallback1 = cleanUsername === 'granmaestro' && cleanPassword === 'ScaccoMatto2026!';
-    const isFallback2 = cleanUsername === 'admin' && cleanPassword === 'chessadmin2026';
-    
-    if (isPrimaryValid || isFallback1 || isFallback2) {
+    // Validazione esclusivamente contro adminDb.admin. Il guard su dbAdminPass
+    // non vuoto rifiuta ogni accesso se nessuna password è configurata.
+    const isValid = dbAdminPass !== '' && cleanUsername === dbAdminUser && cleanPassword === dbAdminPass;
+
+    if (isValid) {
       adminSessionToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-      const resolvedUsername = isFallback1 ? 'granmaestro' : (isFallback2 ? 'admin' : adminDb.admin.username);
-      addLog(`[ACCESSO ADMIN] Accesso autorizzato con successo per l'amministratore: "${resolvedUsername}"`, 'info');
-      res.json({ success: true, token: adminSessionToken, username: resolvedUsername });
+      addLog(`[ACCESSO ADMIN] Accesso autorizzato con successo per l'amministratore: "${adminDb.admin.username}"`, 'info');
+      res.json({ success: true, token: adminSessionToken, username: adminDb.admin.username });
     } else {
+      // Logging dettagliato lato server (non esposto pubblicamente).
       addLog(`[ACCESSO ADMIN] Tentativo di login fallito. Username inserito: "${(username || '').trim()}"`, 'warn');
-      
-      let debugMessage = 'Credenziali di accesso non valide.';
-      if (cleanUsername !== dbAdminUser && cleanUsername !== 'granmaestro' && cleanUsername !== 'admin') {
-        debugMessage += ` Nome utente "${(username || '').trim()}" non riconosciuto come amministratore nel database o tra i fallback.`;
-      } else {
-        debugMessage += ` Password non corretta per l'utente "${(username || '').trim()}".`;
-      }
-      
-      res.status(401).json({ success: false, message: debugMessage });
+      // Messaggio generico: non rivela se sia errato lo username o la password.
+      res.status(401).json({ success: false, message: 'Credenziali di accesso non valide.' });
     }
   });
 
