@@ -1,7 +1,7 @@
 /**
- * Versione: 2.3.0
- * Data e Ora Modifica: 07/07/2026 15:30:00 (Ora di Roma)
- * Problema Risolto: Messa in sicurezza del login amministratore (/api/admin/login): rimosse le credenziali di fallback hardcoded, credenziali risolte solo da adminDb.admin (via env ADMIN_USERNAME/ADMIN_PASSWORD o password casuale generata all'avvio), messaggio d'errore generico (anti username-enumeration) e rate limiting (5 tentativi/15min per IP con express-rate-limit).
+ * Versione: 2.4.0
+ * Data e Ora Modifica: 09/07/2026 10:00:00 (Ora di Roma)
+ * Problema Risolto: Aggiunta la funzionalità di feedback dei giocatori: nuova tabella "feedback", endpoint pubblico POST /api/feedback (invio osservazioni con validazione) ed endpoint admin protetto GET /api/admin/feedback (lettura ordinata dal più recente), con fallback JSON coerente con il pattern degli utenti.
  */
 
 import express from 'express';
@@ -58,6 +58,14 @@ interface DbUser {
   privacyPolicyVersion?: string;
 }
 
+interface FeedbackEntry {
+  id: string;
+  playerName: string;
+  title: string;
+  message: string;
+  createdAt?: string;
+}
+
 // Load/save leaderboard from a local file so ratings are persistent
 const LEADERBOARD_FILE = path.join(process.cwd(), 'leaderboard_data.json');
 let leaderboard: LeaderboardEntry[] = [];
@@ -103,7 +111,8 @@ let adminDb = {
     senderEmail: '',
     senderName: ''
   },
-  users: [] as DbUser[]
+  users: [] as DbUser[],
+  feedback: [] as FeedbackEntry[]
 };
 
 const ADMIN_DB_FILE = path.join(process.cwd(), 'admin_db.json');
@@ -248,6 +257,17 @@ async function initPgDb() {
       }
 
       addLog('Tabella users verificata/creata in PostgreSQL.');
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS feedback (
+          id VARCHAR(50) PRIMARY KEY,
+          player_name VARCHAR(255),
+          title VARCHAR(100) NOT NULL,
+          message TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      addLog('Tabella feedback verificata/creata in PostgreSQL.');
     } finally {
       client.release();
     }
@@ -315,6 +335,44 @@ async function addUser(user: DbUser): Promise<void> {
   });
   saveAdminDb();
   addLog(`Utente inserito nel database JSON locale con successo: ${user.username}`);
+}
+
+// Feedback helper methods mapping to PostgreSQL/JSON fallback
+async function getFeedback(): Promise<FeedbackEntry[]> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const res = await pool.query('SELECT id, player_name as "playerName", title, message, created_at as "createdAt" FROM feedback ORDER BY created_at DESC');
+      return res.rows;
+    } catch (err: any) {
+      addLog('Errore durante la lettura dei feedback da PostgreSQL, provo fallback locale: ' + err.message, 'error');
+    }
+  }
+  if (!adminDb.feedback) adminDb.feedback = [];
+  return [...adminDb.feedback].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+}
+
+async function addFeedback(entry: FeedbackEntry): Promise<void> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await pool.query(
+        'INSERT INTO feedback (id, player_name, title, message) VALUES ($1, $2, $3, $4)',
+        [entry.id, entry.playerName, entry.title, entry.message]
+      );
+      return;
+    } catch (err: any) {
+      addLog('Errore durante l\'inserimento del feedback in PostgreSQL: ' + err.message, 'error');
+      throw err;
+    }
+  }
+
+  if (!adminDb.feedback) adminDb.feedback = [];
+  adminDb.feedback.push({
+    ...entry,
+    createdAt: entry.createdAt || new Date().toISOString()
+  });
+  saveAdminDb();
 }
 
 async function updateUserVerification(userId: string, isVerified: boolean, verificationCode: string): Promise<boolean> {
@@ -479,6 +537,38 @@ async function startServer() {
 
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', onlinePlayersCount: Object.keys(players).length });
+  });
+
+  // Public API - Submit a player feedback/observation (no admin auth required)
+  app.post('/api/feedback', async (req, res) => {
+    const { playerName, title, message } = req.body || {};
+    const cleanPlayer = (playerName || '').trim() || 'Anonimo';
+    const cleanTitle = (title || '').trim();
+    const cleanMessage = (message || '').trim();
+
+    if (!cleanTitle || !cleanMessage) {
+      return res.status(400).json({ success: false, message: 'Titolo e messaggio sono obbligatori.' });
+    }
+    if (cleanTitle.length > 100) {
+      return res.status(400).json({ success: false, message: 'Il titolo non può superare i 100 caratteri.' });
+    }
+    if (cleanMessage.length > 2000) {
+      return res.status(400).json({ success: false, message: 'Il messaggio non può superare i 2000 caratteri.' });
+    }
+
+    try {
+      const entry: FeedbackEntry = {
+        id: `feedback_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        playerName: cleanPlayer.substring(0, 255),
+        title: cleanTitle,
+        message: cleanMessage
+      };
+      await addFeedback(entry);
+      addLog(`Nuovo feedback ricevuto da ${cleanPlayer}`, 'info');
+      res.json({ success: true, message: 'Grazie per la tua osservazione!' });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: 'Errore nel salvataggio del feedback: ' + err.message });
+    }
   });
 
   // CAPTCHA Storage in memory
@@ -818,6 +908,19 @@ async function startServer() {
       res.json({ success: true, users: allUsers });
     } catch (err: any) {
       res.status(500).json({ success: false, message: 'Errore nel recupero degli utenti: ' + err.message });
+    }
+  });
+
+  // Admin API - Read all player feedback (most recent first)
+  app.get('/api/admin/feedback', async (req, res) => {
+    if (!isTokenValid(req)) {
+      return res.status(403).json({ success: false, message: 'Non autorizzato.' });
+    }
+    try {
+      const allFeedback = await getFeedback();
+      res.json({ success: true, feedback: allFeedback });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: 'Errore nel recupero dei feedback: ' + err.message });
     }
   });
 
