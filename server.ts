@@ -1,7 +1,7 @@
 /**
- * Versione: 2.4.0
- * Data e Ora Modifica: 09/07/2026 10:00:00 (Ora di Roma)
- * Problema Risolto: Aggiunta la funzionalità di feedback dei giocatori: nuova tabella "feedback", endpoint pubblico POST /api/feedback (invio osservazioni con validazione) ed endpoint admin protetto GET /api/admin/feedback (lettura ordinata dal più recente), con fallback JSON coerente con il pattern degli utenti.
+ * Versione: 2.5.0
+ * Data e Ora Modifica: 12/07/2026 14:30:00 (Ora di Roma)
+ * Problema Risolto: Cancellazione automatica degli account inattivi da oltre 6 mesi (coerenza con l'informativa privacy): nuova colonna last_login aggiornata ad ogni login riuscito e job giornaliero (cleanupInactiveAccounts) che elimina in sicurezza gli account con ultimo accesso/creazione più vecchi di 6 mesi.
  */
 
 import express from 'express';
@@ -56,6 +56,7 @@ interface DbUser {
   verificationCode?: string;
   privacyAcceptedAt?: string;
   privacyPolicyVersion?: string;
+  lastLogin?: string;
 }
 
 interface FeedbackEntry {
@@ -252,6 +253,7 @@ async function initPgDb() {
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code VARCHAR(10);`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_accepted_at TIMESTAMP;`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_policy_version VARCHAR(20);`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP;`);
       } catch (colErr: any) {
         addLog('Nota: Colonne di verifica già presenti o errore innocuo: ' + colErr.message, 'info');
       }
@@ -281,7 +283,7 @@ async function getUsers(): Promise<DbUser[]> {
   const pool = getPgPool();
   if (pool) {
     try {
-      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion" FROM users ORDER BY username ASC');
+      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion", last_login as "lastLogin" FROM users ORDER BY username ASC');
       return res.rows;
     } catch (err: any) {
       addLog('Errore durante la lettura degli utenti da PostgreSQL, provo fallback locale: ' + err.message, 'error');
@@ -295,7 +297,7 @@ async function getUserByUsername(username: string): Promise<DbUser | null> {
   const pool = getPgPool();
   if (pool) {
     try {
-      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion" FROM users WHERE LOWER(username) = LOWER($1)', [username.trim()]);
+      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion", last_login as "lastLogin" FROM users WHERE LOWER(username) = LOWER($1)', [username.trim()]);
       if (res.rows.length > 0) return res.rows[0];
       return null;
     } catch (err: any) {
@@ -401,6 +403,49 @@ async function updateUserVerification(userId: string, isVerified: boolean, verif
     return true;
   }
   return false;
+}
+
+// Registra la data dell'ultimo accesso riuscito dell'utente (PostgreSQL o fallback JSON)
+async function updateLastLogin(userId: string): Promise<void> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await pool.query('UPDATE users SET last_login = NOW() WHERE id = $1', [userId]);
+      return;
+    } catch (err: any) {
+      addLog(`Errore aggiornamento last_login in PostgreSQL per utente ID ${userId}: ${err.message}`, 'error');
+    }
+  }
+  if (!adminDb.users) adminDb.users = [];
+  const u = adminDb.users.find(usr => usr.id === userId);
+  if (u) {
+    u.lastLogin = new Date().toISOString();
+    saveAdminDb();
+  }
+}
+
+// Cancellazione automatica degli account inattivi da oltre 6 mesi (ultimo login,
+// oppure data di creazione se non è mai stato effettuato un altro accesso).
+async function cleanupInactiveAccounts(): Promise<void> {
+  const pool = getPgPool();
+  if (!pool) {
+    // Nessun PostgreSQL disponibile: skip senza bloccare nulla.
+    return;
+  }
+  try {
+    // La clausola WHERE è sempre presente: nessun rischio di svuotare la tabella.
+    // COALESCE usa created_at se last_login è NULL; se entrambi NULL la riga NON
+    // viene eliminata (NULL < ... è NULL, non true).
+    const res = await pool.query(
+      `DELETE FROM users
+       WHERE COALESCE(last_login, created_at) < NOW() - INTERVAL '6 months'
+       RETURNING id`
+    );
+    const count = res.rowCount ?? 0;
+    addLog(`[CLEANUP] Rimossi ${count} account inattivi da oltre 6 mesi.`, 'info');
+  } catch (err: any) {
+    addLog(`[CLEANUP] Errore durante la pulizia degli account inattivi: ${err.message}`, 'error');
+  }
 }
 
 async function updateUser(user: DbUser): Promise<boolean> {
@@ -871,6 +916,8 @@ async function startServer() {
           message: 'Questo account non è verificato. Abbiamo inviato un nuovo codice di verifica alla tua email.'
         });
       }
+
+      await updateLastLogin(user.id);
 
       addLog(`Utente loggato con successo: ${user.username}`, 'info');
       res.json({
@@ -1986,6 +2033,11 @@ async function startServer() {
       if (!brevoSenderEmail) missing.push('BREVO_SENDER_EMAIL');
       addLog(`[BREVO_INIT] Brevo NON CONFIGURATO o incompleto. Variabili mancanti: ${missing.join(', ')}. L'invio delle email di verifica sarà bypassato (Mock Mode).`, 'warn');
     }
+
+    // Pulizia automatica degli account inattivi da 6 mesi: una passata all'avvio
+    // (non-bloccante) e poi ogni 24 ore.
+    cleanupInactiveAccounts();
+    setInterval(cleanupInactiveAccounts, 24 * 60 * 60 * 1000);
   });
 }
 
