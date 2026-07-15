@@ -1,9 +1,9 @@
 {
-  "_comment_version": "1.0.3",
-  "_comment_datetime": "07/07/2026 15:30:00 (Ora di Roma)",
-  "_comment_description": "Aggiunta la dipendenza express-rate-limit per il rate limiting del login amministratore.",
+  "_comment_version": "1.1.0",
+  "_comment_datetime": "15/07/2026 (Ora di Roma)",
+  "_comment_description": "Sicurezza account: hashing bcrypt delle password (con migrazione lazy delle password legacy in chiaro al login), password rimossa dalle email, e nuovi endpoint reset password via link email e recupero username (risposte anti-enumerazione). Aggiunta dipendenza bcryptjs.",
   "name": "chess-backend",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "private": true,
   "main": "server.ts",
   "type": "module",
@@ -14,19 +14,18 @@
   },
   "dependencies": {
     "@getbrevo/brevo": "^2.2.0",
-    "express": "^4.21.2",
-    "express-rate-limit": "^7.4.1",
-    "pg": "^8.22.0",
-    "ws": "^8.21.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.8.2",
-    "vite": "^6.2.3",
-    "dotenv": "^17.2.3",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/pg": "^8.20.0",
-    "@types/ws": "^8.18.1"
-  },
-  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "pg": "^8.22.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.3",
+    "ws": "^8.21.0"
   }
 }
