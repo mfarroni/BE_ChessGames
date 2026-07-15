@@ -15,7 +15,8 @@ import { Player, ChessGame, LeaderboardEntry, WsMessage } from './types.js';
 import pg from 'pg';
 import * as SibApiV3Sdk from '@getbrevo/brevo';
 import rateLimit from 'express-rate-limit';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
+import bcrypt from 'bcryptjs';
 const { Pool } = pg;
 
 
@@ -57,6 +58,10 @@ interface DbUser {
   privacyAcceptedAt?: string;
   privacyPolicyVersion?: string;
   lastLogin?: string;
+  // Reset password: in DB salviamo SOLO l'hash (SHA-256) del token, mai il token
+  // in chiaro, con scadenza. Il token è monouso (azzerato dopo l'uso).
+  resetTokenHash?: string | null;
+  resetTokenExpires?: string | null;
 }
 
 interface FeedbackEntry {
@@ -254,6 +259,8 @@ async function initPgDb() {
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_accepted_at TIMESTAMP;`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_policy_version VARCHAR(20);`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP;`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP;`);
       } catch (colErr: any) {
         addLog('Nota: Colonne di verifica già presenti o errore innocuo: ' + colErr.message, 'info');
       }
@@ -306,6 +313,22 @@ async function getUserByUsername(username: string): Promise<DbUser | null> {
   }
   if (!adminDb.users) adminDb.users = [];
   const matched = adminDb.users.find(u => u.username.toLowerCase() === username.trim().toLowerCase());
+  return matched || null;
+}
+
+async function getUserByEmail(email: string): Promise<DbUser | null> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion", last_login as "lastLogin" FROM users WHERE LOWER(email) = LOWER($1)', [email.trim()]);
+      if (res.rows.length > 0) return res.rows[0];
+      return null;
+    } catch (err: any) {
+      addLog('Errore durante la ricerca dell\'utente per email in PostgreSQL: ' + err.message, 'error');
+    }
+  }
+  if (!adminDb.users) adminDb.users = [];
+  const matched = adminDb.users.find(u => u.email.toLowerCase() === email.trim().toLowerCase());
   return matched || null;
 }
 
@@ -485,6 +508,111 @@ async function updateUser(user: DbUser): Promise<boolean> {
   saveAdminDb();
   addLog(`Utente aggiornato nel database JSON locale: ${user.username}`);
   return true;
+}
+
+// --- Password hashing (bcrypt) e token di reset ---
+
+const BCRYPT_COST = 12;
+
+// Riconosce un hash bcrypt ($2a$/$2b$/$2y$) da una password legacy in chiaro.
+function isBcryptHash(value: string | undefined | null): boolean {
+  return typeof value === 'string' && /^\$2[aby]\$/.test(value);
+}
+
+async function hashPassword(plain: string): Promise<string> {
+  return bcrypt.hash(plain, BCRYPT_COST);
+}
+
+// Hash deterministico del token di reset: SHA-256, così è interrogabile nel DB
+// (a differenza di bcrypt). In DB salviamo solo questo, mai il token in chiaro.
+function hashResetToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+// Aggiorna SOLO la password (hash) di un utente. Usata dalla migrazione lazy e
+// dal reset password.
+async function updateUserPassword(userId: string, hashedPassword: string): Promise<boolean> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const res = await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
+      return (res.rowCount ?? 0) > 0;
+    } catch (err: any) {
+      addLog('Errore durante l\'aggiornamento della password in PostgreSQL: ' + err.message, 'error');
+      throw err;
+    }
+  }
+  if (!adminDb.users) adminDb.users = [];
+  const u = adminDb.users.find(usr => usr.id === userId);
+  if (!u) return false;
+  u.password = hashedPassword;
+  saveAdminDb();
+  return true;
+}
+
+// Salva l'hash del token di reset e la scadenza (ISO) per un utente.
+async function setUserResetToken(userId: string, tokenHash: string, expiresIso: string): Promise<boolean> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const res = await pool.query('UPDATE users SET reset_token_hash = $1, reset_token_expires = $2 WHERE id = $3', [tokenHash, expiresIso, userId]);
+      return (res.rowCount ?? 0) > 0;
+    } catch (err: any) {
+      addLog('Errore durante il salvataggio del token di reset in PostgreSQL: ' + err.message, 'error');
+      throw err;
+    }
+  }
+  if (!adminDb.users) adminDb.users = [];
+  const u = adminDb.users.find(usr => usr.id === userId);
+  if (!u) return false;
+  u.resetTokenHash = tokenHash;
+  u.resetTokenExpires = expiresIso;
+  saveAdminDb();
+  return true;
+}
+
+// Trova un utente il cui token di reset (per hash) è valido e non scaduto.
+async function findUserByValidResetToken(tokenHash: string): Promise<DbUser | null> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const res = await pool.query('SELECT id, username, email, password FROM users WHERE reset_token_hash = $1 AND reset_token_expires IS NOT NULL AND reset_token_expires > NOW()', [tokenHash]);
+      if (res.rows.length > 0) return res.rows[0];
+      return null;
+    } catch (err: any) {
+      addLog('Errore durante la ricerca del token di reset in PostgreSQL: ' + err.message, 'error');
+    }
+    return null;
+  }
+  if (!adminDb.users) adminDb.users = [];
+  const now = Date.now();
+  const matched = adminDb.users.find(u =>
+    u.resetTokenHash === tokenHash &&
+    u.resetTokenExpires != null &&
+    new Date(u.resetTokenExpires).getTime() > now
+  );
+  return matched || null;
+}
+
+// Azzera il token di reset (monouso) dopo l'utilizzo.
+async function clearUserResetToken(userId: string): Promise<void> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await pool.query('UPDATE users SET reset_token_hash = NULL, reset_token_expires = NULL WHERE id = $1', [userId]);
+      return;
+    } catch (err: any) {
+      addLog('Errore durante l\'azzeramento del token di reset in PostgreSQL: ' + err.message, 'error');
+      return;
+    }
+  }
+  if (!adminDb.users) adminDb.users = [];
+  const u = adminDb.users.find(usr => usr.id === userId);
+  if (u) {
+    u.resetTokenHash = null;
+    u.resetTokenExpires = null;
+    saveAdminDb();
+  }
 }
 
 async function deleteUser(id: string): Promise<boolean> {
@@ -697,7 +825,7 @@ async function startServer() {
     }
   }
 
-  async function sendVerificationEmail(email: string, username: string, code: string, password?: string): Promise<boolean> {
+  async function sendVerificationEmail(email: string, username: string, code: string): Promise<boolean> {
     const htmlContent = `
       <div style="background-color: #0c0806; color: #f5f5f4; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; border-radius: 16px; max-width: 600px; margin: 0 auto; border: 2px solid #78350f;">
         <div style="text-align: center; margin-bottom: 30px;">
@@ -717,7 +845,6 @@ async function startServer() {
             <p style="margin: 0 0 8px 0; font-size: 14px;"><strong style="color: #f59e0b;">I tuoi dati di registrazione:</strong></p>
             <p style="margin: 0 0 4px 0; font-size: 13px; color: #d6d3d1;">• <strong>Username:</strong> ${username}</p>
             <p style="margin: 0 0 4px 0; font-size: 13px; color: #d6d3d1;">• <strong>Email:</strong> ${email}</p>
-            ${password ? `<p style="margin: 0; font-size: 13px; color: #d6d3d1;">• <strong>Password:</strong> ${password}</p>` : ''}
           </div>
 
           <p style="font-size: 12px; color: #78716c; margin-bottom: 0; text-align: center;">Questo codice scadrà tra 15 minuti. Se non hai richiesto tu questa iscrizione, ignora semplicemente questo messaggio.</p>
@@ -733,6 +860,71 @@ async function startServer() {
       to: email,
       toName: username,
       subject: `Codice di Verifica Circolo degli Scacchi: ${code}`,
+      htmlContent
+    });
+  }
+
+  // Email per il reset della password: contiene il link con il token in chiaro
+  // (il DB ne conserva solo l'hash). Stile coerente con sendVerificationEmail.
+  async function sendPasswordResetEmail(email: string, username: string, resetLink: string): Promise<boolean> {
+    const htmlContent = `
+      <div style="background-color: #0c0806; color: #f5f5f4; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; border-radius: 16px; max-width: 600px; margin: 0 auto; border: 2px solid #78350f;">
+        <div style="text-align: center; margin-bottom: 30px;">
+          <h2 style="color: #f59e0b; font-family: serif; font-size: 28px; margin: 0; text-transform: uppercase; letter-spacing: 2px;">Circolo degli Scacchi</h2>
+          <p style="color: #a8a29e; font-size: 14px; margin-top: 5px;">Reimposta la tua Password</p>
+        </div>
+        <div style="background-color: #1c1917; padding: 30px; border-radius: 12px; border: 1px solid #44403c; text-align: left;">
+          <p style="font-size: 16px; margin-top: 0; text-align: center;">Ciao <strong style="color: #f59e0b;">${username}</strong>,</p>
+          <p style="font-size: 14px; color: #d6d3d1; line-height: 1.6; text-align: center;">Abbiamo ricevuto una richiesta di reimpostazione della password per il tuo account. Clicca sul pulsante qui sotto per scegliere una nuova password:</p>
+          <div style="text-align: center; margin: 28px 0;">
+            <a href="${resetLink}" style="background-color: #78350f; color: #f5f5f4; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-size: 16px; font-weight: bold; display: inline-block; border: 1px solid #f59e0b;">Reimposta la password</a>
+          </div>
+          <p style="font-size: 12px; color: #a8a29e; line-height: 1.6; text-align: center;">Se il pulsante non funziona, copia e incolla questo indirizzo nel browser:</p>
+          <p style="font-size: 12px; color: #d6d3d1; word-break: break-all; text-align: center;">${resetLink}</p>
+          <p style="font-size: 12px; color: #78716c; margin-bottom: 0; text-align: center;">Questo link scadrà tra 1 ora e può essere usato una sola volta. Se non hai richiesto tu il reset, ignora semplicemente questo messaggio: la tua password resterà invariata.</p>
+        </div>
+        <div style="text-align: center; margin-top: 30px; color: #57534e; font-size: 11px;">
+          Circolo degli Scacchi d'Elite • Gioca gratis online • © 2026
+        </div>
+      </div>
+    `;
+    addLog(`[SICUREZZA] Inviato link di reset password a ${username} (${email}).`, 'info');
+    return sendEmailViaBrevo({
+      to: email,
+      toName: username,
+      subject: 'Reimposta la tua password - Circolo degli Scacchi',
+      htmlContent
+    });
+  }
+
+  // Email per il recupero dello username associato a un indirizzo email.
+  async function sendUsernameRecoveryEmail(email: string, username: string): Promise<boolean> {
+    const htmlContent = `
+      <div style="background-color: #0c0806; color: #f5f5f4; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; border-radius: 16px; max-width: 600px; margin: 0 auto; border: 2px solid #78350f;">
+        <div style="text-align: center; margin-bottom: 30px;">
+          <h2 style="color: #f59e0b; font-family: serif; font-size: 28px; margin: 0; text-transform: uppercase; letter-spacing: 2px;">Circolo degli Scacchi</h2>
+          <p style="color: #a8a29e; font-size: 14px; margin-top: 5px;">Recupero Username</p>
+        </div>
+        <div style="background-color: #1c1917; padding: 30px; border-radius: 12px; border: 1px solid #44403c; text-align: left;">
+          <p style="font-size: 16px; margin-top: 0; text-align: center;">Ciao,</p>
+          <p style="font-size: 14px; color: #d6d3d1; line-height: 1.6; text-align: center;">Hai richiesto il recupero dello username associato a questo indirizzo email. Ecco il tuo username:</p>
+          <div style="text-align: center;">
+            <div style="background-color: #0c0806; padding: 15px 30px; border-radius: 8px; border: 1px solid #78350f; display: inline-block; margin: 25px 0; font-size: 24px; font-weight: bold; color: #f59e0b;">
+              ${username}
+            </div>
+          </div>
+          <p style="font-size: 12px; color: #78716c; margin-bottom: 0; text-align: center;">Se non hai richiesto tu questo recupero, ignora semplicemente questo messaggio.</p>
+        </div>
+        <div style="text-align: center; margin-top: 30px; color: #57534e; font-size: 11px;">
+          Circolo degli Scacchi d'Elite • Gioca gratis online • © 2026
+        </div>
+      </div>
+    `;
+    addLog(`[SICUREZZA] Inviato recupero username a ${username} (${email}).`, 'info');
+    return sendEmailViaBrevo({
+      to: email,
+      toName: username,
+      subject: 'Il tuo username - Circolo degli Scacchi',
       htmlContent
     });
   }
@@ -847,11 +1039,14 @@ async function startServer() {
       // Generate 6-digit verification code
       const code = Math.floor(100000 + Math.random() * 900000).toString();
 
+      // La password è salvata come hash bcrypt, mai in chiaro.
+      const hashedPassword = await hashPassword(cleanPassword);
+
       const newUser: DbUser = {
         id: `usr_${Math.random().toString(36).substring(2, 9)}`,
         username: cleanUsername,
         email: cleanEmail,
-        password: cleanPassword,
+        password: hashedPassword,
         rating: 1500,
         wins: 0,
         losses: 0,
@@ -862,9 +1057,9 @@ async function startServer() {
       };
 
       await addUser(newUser);
-      
+
       // Send Email in background
-      sendVerificationEmail(cleanEmail, cleanUsername, code, cleanPassword);
+      sendVerificationEmail(cleanEmail, cleanUsername, code);
 
       addLog(`Nuovo utente registrato (in attesa di verifica): ${cleanUsername} (${cleanEmail})`, 'info');
       res.json({ 
@@ -895,7 +1090,27 @@ async function startServer() {
     }
     try {
       const user = await getUserByUsername(username.trim());
-      if (!user || user.password !== password.trim()) {
+      const suppliedPassword = password.trim();
+      let passwordOk = false;
+      if (user) {
+        const stored = user.password || '';
+        if (isBcryptHash(stored)) {
+          passwordOk = await bcrypt.compare(suppliedPassword, stored);
+        } else {
+          // Password legacy in chiaro: confronto diretto e, se corrisponde,
+          // migrazione immediata all'hash bcrypt (da ora in poi sarà hashata).
+          passwordOk = stored === suppliedPassword;
+          if (passwordOk) {
+            try {
+              await updateUserPassword(user.id, await hashPassword(suppliedPassword));
+              addLog(`Password migrata ad hash bcrypt per l'utente: ${user.username}`, 'info');
+            } catch (migErr: any) {
+              addLog(`Migrazione password fallita per ${user.username}: ${migErr.message}`, 'warn');
+            }
+          }
+        }
+      }
+      if (!user || !passwordOk) {
         addLog(`Tentativo di login fallito per l'utente: ${username}`, 'warn');
         return res.status(401).json({ success: false, message: 'Username o password non validi.' });
       }
@@ -905,7 +1120,7 @@ async function startServer() {
         // Resend verification code
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         await updateUserVerification(user.id, false, code);
-        sendVerificationEmail(user.email, user.username, code, user.password);
+        sendVerificationEmail(user.email, user.username, code);
         
         addLog(`Utente non verificato ha tentato il login: ${user.username}. Nuovo codice inviato.`, 'warn');
         return res.json({
@@ -934,6 +1149,100 @@ async function startServer() {
     } catch (err: any) {
       addLog(`Errore durante il login di ${username}: ` + err.message, 'error');
       res.status(500).json({ success: false, message: 'Errore durante il login: ' + err.message });
+    }
+  });
+
+  // Rate limiter condiviso per gli endpoint che inviano email di account
+  // (forgot/reset/recover): max 5 richieste ogni 15 minuti per IP, per limitare
+  // abusi ed enumerazione.
+  const accountEmailLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'Troppe richieste. Riprova tra qualche minuto.' }
+  });
+
+  // Messaggio generico identico per esistenza/non esistenza dell'email
+  // (prevenzione enumerazione degli account registrati).
+  const GENERIC_EMAIL_SENT_MESSAGE =
+    'Se l\'indirizzo email è associato a un account, riceverai a breve un messaggio con le istruzioni.';
+
+  // Public User Auth API - Forgot Password (richiesta link di reset)
+  app.post('/api/auth/forgot-password', accountEmailLimiter, async (req, res) => {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return res.status(400).json({ success: false, message: 'Email richiesta.' });
+    }
+    try {
+      const user = await getUserByEmail(email.trim());
+      if (user) {
+        // Token in chiaro inviato via email; nel DB solo l'hash SHA-256.
+        const token = randomBytes(32).toString('hex');
+        const tokenHash = hashResetToken(token);
+        const expiresIso = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 ora
+        await setUserResetToken(user.id, tokenHash, expiresIso);
+
+        const baseUrl = (process.env.FRONTEND_URL || 'https://www.granmasterchess.it').replace(/\/$/, '');
+        const resetLink = `${baseUrl}/reset-password?token=${token}`;
+        // Invio in background: la risposta non dipende dall'esito (anti-enumerazione).
+        sendPasswordResetEmail(user.email, user.username, resetLink);
+      } else {
+        addLog(`Richiesta reset password per email non registrata (risposta generica).`, 'info');
+      }
+      // Risposta SEMPRE identica, esista o meno l'email.
+      return res.json({ success: true, message: GENERIC_EMAIL_SENT_MESSAGE });
+    } catch (err: any) {
+      addLog('Errore durante forgot-password: ' + err.message, 'error');
+      // Anche in caso di errore interno manteniamo la risposta generica.
+      return res.json({ success: true, message: GENERIC_EMAIL_SENT_MESSAGE });
+    }
+  });
+
+  // Public User Auth API - Reset Password (imposta nuova password con token)
+  app.post('/api/auth/reset-password', accountEmailLimiter, async (req, res) => {
+    const { token, newPassword } = req.body;
+    if (!token || typeof token !== 'string' || !newPassword || typeof newPassword !== 'string') {
+      return res.status(400).json({ success: false, message: 'Token e nuova password sono richiesti.' });
+    }
+    const cleanPassword = newPassword.trim();
+    if (cleanPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'La nuova password deve contenere almeno 6 caratteri.' });
+    }
+    try {
+      const tokenHash = hashResetToken(token.trim());
+      const user = await findUserByValidResetToken(tokenHash);
+      if (!user) {
+        return res.status(400).json({ success: false, message: 'Link non valido o scaduto, richiedine uno nuovo.' });
+      }
+      await updateUserPassword(user.id, await hashPassword(cleanPassword));
+      await clearUserResetToken(user.id); // token monouso
+      addLog(`Password reimpostata con successo per l'utente: ${user.username}`, 'info');
+      return res.json({ success: true, message: 'Password reimpostata con successo. Ora puoi accedere con la nuova password.' });
+    } catch (err: any) {
+      addLog('Errore durante reset-password: ' + err.message, 'error');
+      return res.status(500).json({ success: false, message: 'Errore durante il reset della password.' });
+    }
+  });
+
+  // Public User Auth API - Recover Username (invia lo username via email)
+  app.post('/api/auth/recover-username', accountEmailLimiter, async (req, res) => {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return res.status(400).json({ success: false, message: 'Email richiesta.' });
+    }
+    try {
+      const user = await getUserByEmail(email.trim());
+      if (user) {
+        sendUsernameRecoveryEmail(user.email, user.username);
+      } else {
+        addLog(`Richiesta recupero username per email non registrata (risposta generica).`, 'info');
+      }
+      // Risposta SEMPRE identica, esista o meno l'email.
+      return res.json({ success: true, message: GENERIC_EMAIL_SENT_MESSAGE });
+    } catch (err: any) {
+      addLog('Errore durante recover-username: ' + err.message, 'error');
+      return res.json({ success: true, message: GENERIC_EMAIL_SENT_MESSAGE });
     }
   });
 
