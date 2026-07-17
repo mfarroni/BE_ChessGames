@@ -15,7 +15,7 @@ import { Player, ChessGame, LeaderboardEntry, WsMessage } from './types.js';
 import pg from 'pg';
 import * as SibApiV3Sdk from '@getbrevo/brevo';
 import rateLimit from 'express-rate-limit';
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 const { Pool } = pg;
 
@@ -667,11 +667,32 @@ async function updateUserStatsByUsername(username: string, rating: number, wins:
 }
 
 let adminSessionToken: string | null = null;
+// Scadenza (epoch ms) del token di sessione admin: la sessione dura al massimo
+// 8 ore, poi il token va considerato non valido e rigenerato con un nuovo login.
+let adminSessionTokenExpires: number | null = null;
+const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 ore
 
 const isTokenValid = (req: express.Request): boolean => {
   const token = req.headers['x-admin-token'] || req.body?.token || req.query?.token;
-  return adminSessionToken !== null && token === adminSessionToken;
+  if (adminSessionToken === null || adminSessionTokenExpires === null) return false;
+  // Token scaduto: azzera la sessione e nega l'accesso.
+  if (Date.now() > adminSessionTokenExpires) {
+    adminSessionToken = null;
+    adminSessionTokenExpires = null;
+    return false;
+  }
+  return token === adminSessionToken;
 };
+
+// Confronto di stringhe a tempo costante (mitiga i timing attack). Gestisce le
+// lunghezze diverse senza far lanciare timingSafeEqual (che richiede buffer di
+// uguale lunghezza).
+function timingSafeStrEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
 
 async function startServer() {
   const app = express();
@@ -686,6 +707,38 @@ async function startServer() {
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, message: 'Troppi tentativi di accesso. Riprova più tardi.' }
+  });
+
+  // Login giocatori: max 10 tentativi FALLITI ogni 15 minuti per IP. Con
+  // skipSuccessfulRequests i login riusciti non consumano il budget, così un
+  // utente legittimo (o dietro IP condiviso/NAT) non rischia il blocco.
+  const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    skipSuccessfulRequests: true,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'Troppi tentativi di accesso. Riprova tra qualche minuto.' }
+  });
+
+  // Registrazione: max 5 nuovi account ogni 60 minuti per IP, per limitare lo
+  // spam di creazione account e l'abuso dell'invio di email transazionali.
+  const registerLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'Troppe registrazioni da questo indirizzo. Riprova più tardi.' }
+  });
+
+  // Verifica codice email: max 10 tentativi ogni 15 minuti per IP, dato che il
+  // codice è numerico a 6 cifre (spazio di ricerca limitato, bruteforce-abile).
+  const verifyLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'Troppi tentativi di verifica. Riprova tra qualche minuto.' }
   });
 
   const PORT = Number(process.env.PORT) || 3000;
@@ -951,7 +1004,7 @@ async function startServer() {
   });
 
   // Verify User Email with Code
-  app.post('/api/auth/verify', async (req, res) => {
+  app.post('/api/auth/verify', verifyLimiter, async (req, res) => {
     const { userId, code } = req.body;
     if (!userId || !code) {
       return res.status(400).json({ success: false, message: 'Dati mancanti per la verifica.' });
@@ -995,7 +1048,7 @@ async function startServer() {
   });
 
   // Public User Auth API - Register
-  app.post('/api/auth/register', async (req, res) => {
+  app.post('/api/auth/register', registerLimiter, async (req, res) => {
     const { username, email, password, captchaId, captchaAnswer } = req.body;
     if (!username || !email || !password || !captchaId || !captchaAnswer) {
       return res.status(400).json({ success: false, message: 'Tutti i campi (username, email, password, captcha) sono obbligatori.' });
@@ -1076,7 +1129,7 @@ async function startServer() {
   });
 
   // Public User Auth API - Login
-  app.post('/api/auth/login', async (req, res) => {
+  app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
       return res.status(400).json({ success: false, message: 'Username e password sono richiesti.' });
@@ -1457,11 +1510,14 @@ async function startServer() {
     const dbAdminPass = (adminDb.admin.password || '').trim();
 
     // Validazione esclusivamente contro adminDb.admin. Il guard su dbAdminPass
-    // non vuoto rifiuta ogni accesso se nessuna password è configurata.
-    const isValid = dbAdminPass !== '' && cleanUsername === dbAdminUser && cleanPassword === dbAdminPass;
+    // non vuoto rifiuta ogni accesso se nessuna password è configurata. Il
+    // confronto della password è a tempo costante (mitiga i timing attack).
+    const isValid = dbAdminPass !== '' && cleanUsername === dbAdminUser && timingSafeStrEqual(cleanPassword, dbAdminPass);
 
     if (isValid) {
-      adminSessionToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+      // Token di sessione crittograficamente sicuro, con scadenza a 8 ore.
+      adminSessionToken = randomBytes(32).toString('hex');
+      adminSessionTokenExpires = Date.now() + ADMIN_SESSION_TTL_MS;
       addLog(`[ACCESSO ADMIN] Accesso autorizzato con successo per l'amministratore: "${adminDb.admin.username}"`, 'info');
       res.json({ success: true, token: adminSessionToken, username: adminDb.admin.username });
     } else {

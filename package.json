@@ -1,9 +1,9 @@
 {
-  "_comment_version": "1.1.0",
+  "_comment_version": "1.1.1",
   "_comment_datetime": "15/07/2026 (Ora di Roma)",
-  "_comment_description": "Sicurezza account: hashing bcrypt delle password (con migrazione lazy delle password legacy in chiaro al login), password rimossa dalle email, e nuovi endpoint reset password via link email e recupero username (risposte anti-enumerazione). Aggiunta dipendenza bcryptjs.",
+  "_comment_description": "Rafforzamenti sicurezza: rate limiting su login/register/verify giocatori, token di sessione admin crittograficamente sicuro (randomBytes) con scadenza 8h, e confronto a tempo costante della password admin (timingSafeEqual).",
   "name": "chess-backend",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "main": "server.ts",
   "type": "module",
