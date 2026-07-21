@@ -1,9 +1,9 @@
 {
-  "_comment_version": "1.2.1",
+  "_comment_version": "1.2.2",
   "_comment_datetime": "21/07/2026 (Ora di Roma)",
-  "_comment_description": "Fix upload foto: aggiunto error-handling middleware dedicato alla route /api/admin/photos/upload che restituisce il vero motivo degli errori Multer (400) o interni (500, con err.message) invece di un errore generico, loggando il dettaglio tecnico.",
+  "_comment_description": "Fix build su Render: spostato @types/multer da devDependencies a dependencies (Render esegue npm install con NODE_ENV=production, saltando le devDependencies, e tsc non trovava i tipi di multer). Rimossa la chiave devDependencies ormai vuota.",
   "name": "chess-backend",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "main": "server.ts",
   "type": "module",
@@ -15,6 +15,7 @@
   "dependencies": {
     "@getbrevo/brevo": "^2.2.0",
     "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.12",
     "@types/node": "^22.14.0",
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",
@@ -30,8 +31,5 @@
     "typescript": "^5.8.2",
     "vite": "^6.2.3",
     "ws": "^8.21.0"
-  },
-  "devDependencies": {
-    "@types/multer": "^1.4.12"
   }
 }
