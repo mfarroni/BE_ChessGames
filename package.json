@@ -1,9 +1,9 @@
 {
-  "_comment_version": "1.1.1",
-  "_comment_datetime": "15/07/2026 (Ora di Roma)",
-  "_comment_description": "Rafforzamenti sicurezza: rate limiting su login/register/verify giocatori, token di sessione admin crittograficamente sicuro (randomBytes) con scadenza 8h, e confronto a tempo costante della password admin (timingSafeEqual).",
+  "_comment_version": "1.2.0",
+  "_comment_datetime": "21/07/2026 (Ora di Roma)",
+  "_comment_description": "Backend gestione foto hero landing: upload admin su Vercel Blob Storage (multer memoryStorage + validazione formato/peso/dimensioni/proporzioni via image-size) ed endpoint pubblico che restituisce fino a 5 foto random. Aggiunte dipendenze @vercel/blob, multer, @types/multer, image-size.",
   "name": "chess-backend",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "private": true,
   "main": "server.ts",
   "type": "module",
@@ -18,14 +18,20 @@
     "@types/node": "^22.14.0",
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",
+    "@vercel/blob": "^2.6.1",
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "express-rate-limit": "^7.4.1",
+    "image-size": "^1.1.1",
+    "multer": "^2.0.1",
     "pg": "^8.22.0",
     "tsx": "^4.21.0",
     "typescript": "^5.8.2",
     "vite": "^6.2.3",
     "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/multer": "^1.4.12"
   }
 }
