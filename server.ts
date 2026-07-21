@@ -1442,6 +1442,28 @@ async function startServer() {
     res.json({ success: true, uploaded, skipped });
   });
 
+  // Error-handling middleware dedicato all'upload foto: intercetta gli errori
+  // di Multer (es. file troppo grande o campo inatteso) che altrimenti non
+  // arriverebbero al gestore della route, restituendo il vero motivo invece di
+  // un errore generico. Deve avere 4 parametri per essere trattato da Express
+  // come middleware di errore.
+  app.use('/api/admin/photos/upload', (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (err instanceof multer.MulterError) {
+      const messages: Record<string, string> = {
+        LIMIT_FILE_SIZE: 'Uno dei file supera la dimensione massima consentita per il caricamento (8MB).',
+        LIMIT_FILE_COUNT: 'Troppi file: puoi caricarne al massimo 10 per volta.',
+        LIMIT_UNEXPECTED_FILE: 'Campo file non valido: usa il campo "photos".',
+        LIMIT_PART_COUNT: 'La richiesta contiene troppe parti.',
+        LIMIT_FIELD_COUNT: 'La richiesta contiene troppi campi.',
+      };
+      const message = messages[err.code] || `Errore nel caricamento dei file (${err.code}).`;
+      addLog(`[UPLOAD] Errore Multer su /api/admin/photos/upload: ${err.code} - ${err.message}`, 'error');
+      return res.status(400).json({ success: false, message });
+    }
+    addLog(`[UPLOAD] Errore non-Multer su /api/admin/photos/upload: ${err?.message}`, 'error');
+    return res.status(500).json({ success: false, message: "Errore interno durante l'elaborazione dell'upload: " + (err?.message || 'errore sconosciuto') });
+  });
+
   // Public API - Restituisce fino a 5 foto random tra quelle valide caricate.
   app.get('/api/photos/random', async (req, res) => {
     if (!process.env.BLOB_READ_WRITE_TOKEN) {
