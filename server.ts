@@ -17,6 +17,9 @@ import * as SibApiV3Sdk from '@getbrevo/brevo';
 import rateLimit from 'express-rate-limit';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs';
+import multer from 'multer';
+import { put, list } from '@vercel/blob';
+import { imageSize } from 'image-size';
 const { Pool } = pg;
 
 
@@ -41,6 +44,70 @@ function addLog(message: string, level: 'info' | 'warn' | 'error' = 'info') {
   if (appLogs.length > 500) {
     appLogs.shift();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Foto utente per l'animazione hero della landing page (Vercel Blob Storage).
+// Le foto vengono validate al momento dell'upload (non quando la landing le
+// mostra) cosi' un file non idoneo viene scartato subito, con il motivo
+// scritto nel log applicativo (appLogs / GET /api/admin/logs, già visibile
+// nel pannello admin) invece di rompere silenziosamente la home page.
+// ---------------------------------------------------------------------------
+const HERO_PHOTOS_BLOB_PREFIX = 'hero-photos/';
+const HERO_PHOTO_MAX_BYTES = 5 * 1024 * 1024; // 5MB
+const HERO_PHOTO_MIN_DIM = 400; // px
+const HERO_PHOTO_MAX_DIM = 4000; // px
+const HERO_PHOTO_MIN_ASPECT_RATIO = 0.8; // lato corto / lato lungo (vicino al quadrato)
+const HERO_PHOTO_ALLOWED_MIME: Record<string, boolean> = {
+  'image/jpeg': true,
+  'image/png': true,
+  'image/webp': true,
+};
+
+// Limite del multipart-parser leggermente più alto del limite di validazione
+// (5MB), cosi' un file di 6-7MB arriva comunque al validatore e viene
+// scartato con un motivo preciso, invece di un errore generico di multer.
+const heroPhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 10 },
+});
+
+interface PhotoValidationResult {
+  valid: boolean;
+  reason?: string;
+}
+
+function validateHeroPhoto(file: Express.Multer.File): PhotoValidationResult {
+  if (!HERO_PHOTO_ALLOWED_MIME[file.mimetype]) {
+    return { valid: false, reason: `formato non ammesso (${file.mimetype || 'sconosciuto'}): sono ammessi solo JPG, PNG o WEBP` };
+  }
+  if (file.size > HERO_PHOTO_MAX_BYTES) {
+    return { valid: false, reason: `peso file ${(file.size / (1024 * 1024)).toFixed(1)}MB superiore al massimo di 5MB` };
+  }
+
+  let width: number | undefined;
+  let height: number | undefined;
+  try {
+    const dims = imageSize(file.buffer);
+    width = dims.width;
+    height = dims.height;
+  } catch (err: any) {
+    return { valid: false, reason: `file immagine non leggibile o corrotto: ${err.message}` };
+  }
+  if (!width || !height) {
+    return { valid: false, reason: 'impossibile determinare le dimensioni dell\'immagine' };
+  }
+  if (width < HERO_PHOTO_MIN_DIM || height < HERO_PHOTO_MIN_DIM) {
+    return { valid: false, reason: `dimensioni ${width}x${height}px inferiori al minimo richiesto di ${HERO_PHOTO_MIN_DIM}x${HERO_PHOTO_MIN_DIM}px` };
+  }
+  if (width > HERO_PHOTO_MAX_DIM || height > HERO_PHOTO_MAX_DIM) {
+    return { valid: false, reason: `dimensioni ${width}x${height}px superiori al massimo consentito di ${HERO_PHOTO_MAX_DIM}x${HERO_PHOTO_MAX_DIM}px` };
+  }
+  const aspectRatio = Math.min(width, height) / Math.max(width, height);
+  if (aspectRatio < HERO_PHOTO_MIN_ASPECT_RATIO) {
+    return { valid: false, reason: `proporzioni ${width}x${height}px troppo rettangolari (rapporto ${aspectRatio.toFixed(2)}, minimo richiesto ${HERO_PHOTO_MIN_ASPECT_RATIO}): serve un'immagine vicina al quadrato` };
+  }
+  return { valid: true };
 }
 
 // User Database representation
@@ -1330,6 +1397,67 @@ async function startServer() {
       res.json({ success: true, feedback: allFeedback });
     } catch (err: any) {
       res.status(500).json({ success: false, message: 'Errore nel recupero dei feedback: ' + err.message });
+    }
+  });
+
+  // Admin API - Upload foto per l'animazione hero della landing page.
+  app.post('/api/admin/photos/upload', heroPhotoUpload.array('photos', 10), async (req, res) => {
+    if (!isTokenValid(req)) {
+      return res.status(403).json({ success: false, message: 'Non autorizzato.' });
+    }
+    const files = (req.files as Express.Multer.File[] | undefined) || [];
+    if (files.length === 0) {
+      return res.status(400).json({ success: false, message: 'Nessun file ricevuto.' });
+    }
+    if (!process.env.BLOB_READ_WRITE_TOKEN) {
+      addLog('Upload foto hero rifiutato: BLOB_READ_WRITE_TOKEN non configurato sul server.', 'error');
+      return res.status(500).json({ success: false, message: 'Storage foto non configurato sul server.' });
+    }
+
+    const uploaded: { originalName: string; url: string }[] = [];
+    const skipped: { originalName: string; reason: string }[] = [];
+
+    for (const file of files) {
+      const validation = validateHeroPhoto(file);
+      if (!validation.valid) {
+        skipped.push({ originalName: file.originalname, reason: validation.reason! });
+        addLog(`Foto hero scartata "${file.originalname}": ${validation.reason}`, 'error');
+        continue;
+      }
+      try {
+        const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const blob = await put(`${HERO_PHOTOS_BLOB_PREFIX}${safeName}`, file.buffer, {
+          access: 'public',
+          contentType: file.mimetype,
+          addRandomSuffix: true,
+        });
+        uploaded.push({ originalName: file.originalname, url: blob.url });
+        addLog(`Foto hero caricata: "${file.originalname}" -> ${blob.pathname}`);
+      } catch (err: any) {
+        skipped.push({ originalName: file.originalname, reason: `errore durante il salvataggio su storage: ${err.message}` });
+        addLog(`Foto hero scartata "${file.originalname}": errore upload su Blob Storage: ${err.message}`, 'error');
+      }
+    }
+
+    res.json({ success: true, uploaded, skipped });
+  });
+
+  // Public API - Restituisce fino a 5 foto random tra quelle valide caricate.
+  app.get('/api/photos/random', async (req, res) => {
+    if (!process.env.BLOB_READ_WRITE_TOKEN) {
+      return res.json({ success: true, photos: [] });
+    }
+    try {
+      const { blobs } = await list({ prefix: HERO_PHOTOS_BLOB_PREFIX });
+      const urls = blobs.map((b) => b.url);
+      for (let i = urls.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [urls[i], urls[j]] = [urls[j], urls[i]];
+      }
+      res.json({ success: true, photos: urls.slice(0, 5) });
+    } catch (err: any) {
+      addLog('Errore nel recupero delle foto hero da Blob Storage: ' + err.message, 'error');
+      res.json({ success: true, photos: [] }); // fail-soft: la landing mostra i pezzi standard
     }
   });
 
