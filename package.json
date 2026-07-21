@@ -1,9 +1,9 @@
 {
-  "_comment_version": "1.2.0",
+  "_comment_version": "1.2.1",
   "_comment_datetime": "21/07/2026 (Ora di Roma)",
-  "_comment_description": "Backend gestione foto hero landing: upload admin su Vercel Blob Storage (multer memoryStorage + validazione formato/peso/dimensioni/proporzioni via image-size) ed endpoint pubblico che restituisce fino a 5 foto random. Aggiunte dipendenze @vercel/blob, multer, @types/multer, image-size.",
+  "_comment_description": "Fix upload foto: aggiunto error-handling middleware dedicato alla route /api/admin/photos/upload che restituisce il vero motivo degli errori Multer (400) o interni (500, con err.message) invece di un errore generico, loggando il dettaglio tecnico.",
   "name": "chess-backend",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "main": "server.ts",
   "type": "module",
