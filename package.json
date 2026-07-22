@@ -1,9 +1,9 @@
 {
-  "_comment_version": "1.2.2",
-  "_comment_datetime": "21/07/2026 (Ora di Roma)",
-  "_comment_description": "Fix build su Render: spostato @types/multer da devDependencies a dependencies (Render esegue npm install con NODE_ENV=production, saltando le devDependencies, e tsc non trovava i tipi di multer). Rimossa la chiave devDependencies ormai vuota.",
+  "_comment_version": "1.3.0",
+  "_comment_datetime": "22/07/2026 (Ora di Roma)",
+  "_comment_description": "Sicurezza + stats: aggiornato @getbrevo/brevo a 6.x (nuova SDK BrevoClient, risolte 2 CVE critiche + altre da request/form-data/qs/tough-cookie/uuid); rate limiting su /api/feedback (10/60min) e /api/photos/random (30/min); nuovo endpoint admin /api/admin/stats/funnel per le statistiche della campagna.",
   "name": "chess-backend",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
   "main": "server.ts",
   "type": "module",
@@ -13,7 +13,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@getbrevo/brevo": "^2.2.0",
+    "@getbrevo/brevo": "^6.0.2",
     "@types/express": "^4.17.21",
     "@types/multer": "^1.4.12",
     "@types/node": "^22.14.0",
