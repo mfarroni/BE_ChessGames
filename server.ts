@@ -13,7 +13,7 @@ import fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Player, ChessGame, LeaderboardEntry, WsMessage } from './types.js';
 import pg from 'pg';
-import * as SibApiV3Sdk from '@getbrevo/brevo';
+import { BrevoClient } from '@getbrevo/brevo';
 import rateLimit from 'express-rate-limit';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs';
@@ -808,6 +808,27 @@ async function startServer() {
     message: { success: false, message: 'Troppi tentativi di verifica. Riprova tra qualche minuto.' }
   });
 
+  // Feedback pubblico: max 10 segnalazioni ogni 60 minuti per IP (anti-spam).
+  const feedbackLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'Troppe segnalazioni da questo indirizzo. Riprova più tardi.' }
+  });
+
+  // Foto random pubbliche: max 30 richieste al minuto per IP (ogni richiesta
+  // chiama l'API esterna di Vercel Blob). Il messaggio 429 include comunque
+  // photos: [] così il frontend (HeroPhotoSlideshow, già fail-soft) resta
+  // normale senza mostrare errori all'utente finale.
+  const photosRandomLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, photos: [] }
+  });
+
   const PORT = Number(process.env.PORT) || 3000;
 
   // Custom CORS middleware to allow requests from Vercel / external clients
@@ -833,7 +854,7 @@ async function startServer() {
   });
 
   // Public API - Submit a player feedback/observation (no admin auth required)
-  app.post('/api/feedback', async (req, res) => {
+  app.post('/api/feedback', feedbackLimiter, async (req, res) => {
     const { playerName, title, message } = req.body || {};
     const cleanPlayer = (playerName || '').trim() || 'Anonimo';
     const cleanTitle = (title || '').trim();
@@ -923,16 +944,13 @@ async function startServer() {
       addLog(`[BREVO_DISPATCH] Preparazione invio email tramite Brevo a: ${to} | Oggetto: "${subject}"`, 'info');
 
       try {
-        const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
-        apiInstance.setApiKey(SibApiV3Sdk.TransactionalEmailsApiApiKeys.apiKey, apiKey);
-
-        const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
-        sendSmtpEmail.subject = subject;
-        sendSmtpEmail.htmlContent = htmlContent;
-        sendSmtpEmail.sender = { email: senderEmail, name: senderName };
-        sendSmtpEmail.to = [{ email: to, name: toName || to }];
-
-        await apiInstance.sendTransacEmail(sendSmtpEmail);
+        const brevo = new BrevoClient({ apiKey });
+        await brevo.transactionalEmails.sendTransacEmail({
+          subject,
+          htmlContent,
+          sender: { email: senderEmail, name: senderName },
+          to: [{ email: to, name: toName || to }],
+        });
         addLog(`[BREVO_SUCCESS] Email inviata con successo a ${to} (Oggetto: "${subject}")`, 'info');
         return true;
       } catch (err: any) {
@@ -1400,6 +1418,58 @@ async function startServer() {
     }
   });
 
+  // Admin API - Statistiche funnel (efficacia campagna): utenti totali, nuovi
+  // nel periodo, quanti hanno giocato e quanti sono tornati (last_login dopo la
+  // creazione). Parametro opzionale "since" (ISO); default ultimi 7 giorni.
+  app.get('/api/admin/stats/funnel', async (req, res) => {
+    if (!isTokenValid(req)) {
+      return res.status(403).json({ success: false, message: 'Non autorizzato.' });
+    }
+    const sinceParam = typeof req.query.since === 'string' ? req.query.since : undefined;
+    const sinceDate = sinceParam ? new Date(sinceParam) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    if (isNaN(sinceDate.getTime())) {
+      return res.status(400).json({ success: false, message: 'Parametro "since" non valido.' });
+    }
+
+    try {
+      const pool = getPgPool();
+      if (pool) {
+        const result = await pool.query(
+          `SELECT
+             COUNT(*) AS total_users,
+             COUNT(*) FILTER (WHERE created_at >= $1) AS new_users,
+             COUNT(*) FILTER (WHERE created_at >= $1 AND (wins + losses) > 0) AS new_users_played,
+             COUNT(*) FILTER (WHERE created_at >= $1 AND last_login IS NOT NULL AND last_login > created_at) AS new_users_returned
+           FROM users`,
+          [sinceDate.toISOString()]
+        );
+        const row = result.rows[0];
+        return res.json({
+          success: true,
+          since: sinceDate.toISOString(),
+          totalUsers: Number(row.total_users),
+          newUsers: Number(row.new_users),
+          newUsersPlayed: Number(row.new_users_played),
+          newUsersReturned: Number(row.new_users_returned),
+        });
+      }
+      // Fallback JSON locale (stesso pattern dual-mode già usato altrove nel file)
+      const users = adminDb.users || [];
+      const newUsers = users.filter(u => u.createdAt && new Date(u.createdAt) >= sinceDate);
+      return res.json({
+        success: true,
+        since: sinceDate.toISOString(),
+        totalUsers: users.length,
+        newUsers: newUsers.length,
+        newUsersPlayed: newUsers.filter(u => (u.wins || 0) + (u.losses || 0) > 0).length,
+        newUsersReturned: newUsers.filter(u => u.lastLogin && u.createdAt && new Date(u.lastLogin) > new Date(u.createdAt)).length,
+      });
+    } catch (err: any) {
+      addLog('Errore nel calcolo delle statistiche funnel: ' + err.message, 'error');
+      return res.status(500).json({ success: false, message: 'Errore nel calcolo delle statistiche.' });
+    }
+  });
+
   // Admin API - Upload foto per l'animazione hero della landing page.
   app.post('/api/admin/photos/upload', heroPhotoUpload.array('photos', 10), async (req, res) => {
     if (!isTokenValid(req)) {
@@ -1465,7 +1535,7 @@ async function startServer() {
   });
 
   // Public API - Restituisce fino a 5 foto random tra quelle valide caricate.
-  app.get('/api/photos/random', async (req, res) => {
+  app.get('/api/photos/random', photosRandomLimiter, async (req, res) => {
     if (!process.env.BLOB_READ_WRITE_TOKEN) {
       return res.json({ success: true, photos: [] });
     }
