@@ -1,9 +1,9 @@
 {
-  "_comment_version": "1.3.0",
+  "_comment_version": "1.4.0",
   "_comment_datetime": "22/07/2026 (Ora di Roma)",
-  "_comment_description": "Sicurezza + stats: aggiornato @getbrevo/brevo a 6.x (nuova SDK BrevoClient, risolte 2 CVE critiche + altre da request/form-data/qs/tough-cookie/uuid); rate limiting su /api/feedback (10/60min) e /api/photos/random (30/min); nuovo endpoint admin /api/admin/stats/funnel per le statistiche della campagna.",
+  "_comment_description": "Consensi marketing: due consensi opzionali e distinti (marketing proprio e comunicazione a terzi), separati dal privacyAccepted obbligatorio, salvati con data e versione policy; export CSV admin con 4 colonne consenso separate e senza la colonna Password.",
   "name": "chess-backend",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "main": "server.ts",
   "type": "module",

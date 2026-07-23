@@ -125,6 +125,13 @@ interface DbUser {
   privacyAcceptedAt?: string;
   privacyPolicyVersion?: string;
   lastLogin?: string;
+  // Consensi marketing OPZIONALI e distinti dal privacyAccepted (obbligatorio):
+  // marketing proprio e comunicazione a terzi sono basi giuridiche separate.
+  marketingConsent?: boolean;
+  marketingConsentAt?: string;
+  thirdPartyMarketingConsent?: boolean;
+  thirdPartyMarketingConsentAt?: string;
+  marketingConsentPolicyVersion?: string;
   // Reset password: in DB salviamo SOLO l'hash (SHA-256) del token, mai il token
   // in chiaro, con scadenza. Il token è monouso (azzerato dopo l'uso).
   resetTokenHash?: string | null;
@@ -325,6 +332,11 @@ async function initPgDb() {
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code VARCHAR(10);`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_accepted_at TIMESTAMP;`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_policy_version VARCHAR(20);`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS marketing_consent BOOLEAN DEFAULT FALSE;`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMP;`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS third_party_marketing_consent BOOLEAN DEFAULT FALSE;`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS third_party_marketing_consent_at TIMESTAMP;`);
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS marketing_consent_policy_version VARCHAR(20);`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP;`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;`);
         await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP;`);
@@ -357,7 +369,7 @@ async function getUsers(): Promise<DbUser[]> {
   const pool = getPgPool();
   if (pool) {
     try {
-      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion", last_login as "lastLogin" FROM users ORDER BY username ASC');
+      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion", last_login as "lastLogin", marketing_consent as "marketingConsent", marketing_consent_at as "marketingConsentAt", third_party_marketing_consent as "thirdPartyMarketingConsent", third_party_marketing_consent_at as "thirdPartyMarketingConsentAt", marketing_consent_policy_version as "marketingConsentPolicyVersion" FROM users ORDER BY username ASC');
       return res.rows;
     } catch (err: any) {
       addLog('Errore durante la lettura degli utenti da PostgreSQL, provo fallback locale: ' + err.message, 'error');
@@ -371,7 +383,7 @@ async function getUserByUsername(username: string): Promise<DbUser | null> {
   const pool = getPgPool();
   if (pool) {
     try {
-      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion", last_login as "lastLogin" FROM users WHERE LOWER(username) = LOWER($1)', [username.trim()]);
+      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion", last_login as "lastLogin", marketing_consent as "marketingConsent", marketing_consent_at as "marketingConsentAt", third_party_marketing_consent as "thirdPartyMarketingConsent", third_party_marketing_consent_at as "thirdPartyMarketingConsentAt", marketing_consent_policy_version as "marketingConsentPolicyVersion" FROM users WHERE LOWER(username) = LOWER($1)', [username.trim()]);
       if (res.rows.length > 0) return res.rows[0];
       return null;
     } catch (err: any) {
@@ -387,7 +399,7 @@ async function getUserByEmail(email: string): Promise<DbUser | null> {
   const pool = getPgPool();
   if (pool) {
     try {
-      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion", last_login as "lastLogin" FROM users WHERE LOWER(email) = LOWER($1)', [email.trim()]);
+      const res = await pool.query('SELECT id, username, email, password, rating, wins, losses, is_verified as "isVerified", verification_code as "verificationCode", created_at as "createdAt", privacy_accepted_at as "privacyAcceptedAt", privacy_policy_version as "privacyPolicyVersion", last_login as "lastLogin", marketing_consent as "marketingConsent", marketing_consent_at as "marketingConsentAt", third_party_marketing_consent as "thirdPartyMarketingConsent", third_party_marketing_consent_at as "thirdPartyMarketingConsentAt", marketing_consent_policy_version as "marketingConsentPolicyVersion" FROM users WHERE LOWER(email) = LOWER($1)', [email.trim()]);
       if (res.rows.length > 0) return res.rows[0];
       return null;
     } catch (err: any) {
@@ -404,8 +416,8 @@ async function addUser(user: DbUser): Promise<void> {
   if (pool) {
     try {
       await pool.query(
-        'INSERT INTO users (id, username, email, password, rating, wins, losses, is_verified, verification_code, privacy_accepted_at, privacy_policy_version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)',
-        [user.id, user.username, user.email, user.password || '', user.rating || 1500, user.wins || 0, user.losses || 0, user.isVerified || false, user.verificationCode || '', user.privacyAcceptedAt || null, user.privacyPolicyVersion || null]
+        'INSERT INTO users (id, username, email, password, rating, wins, losses, is_verified, verification_code, privacy_accepted_at, privacy_policy_version, marketing_consent, marketing_consent_at, third_party_marketing_consent, third_party_marketing_consent_at, marketing_consent_policy_version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)',
+        [user.id, user.username, user.email, user.password || '', user.rating || 1500, user.wins || 0, user.losses || 0, user.isVerified || false, user.verificationCode || '', user.privacyAcceptedAt || null, user.privacyPolicyVersion || null, user.marketingConsent || false, user.marketingConsentAt || null, user.thirdPartyMarketingConsent || false, user.thirdPartyMarketingConsentAt || null, user.marketingConsentPolicyVersion || null]
       );
       addLog(`Utente inserito in PostgreSQL con successo: ${user.username}`);
       return;
@@ -1158,6 +1170,10 @@ async function startServer() {
     const cleanEmail = email.trim();
     const cleanPassword = password.trim();
 
+    // Consensi marketing OPZIONALI: non condizionano mai la registrazione.
+    const marketingConsent = req.body.marketingConsent === true;
+    const thirdPartyMarketingConsent = req.body.thirdPartyMarketingConsent === true;
+
     if (cleanUsername.length < 2) {
       return res.status(400).json({ success: false, message: 'L\'username deve contenere almeno 2 caratteri.' });
     }
@@ -1191,7 +1207,12 @@ async function startServer() {
         isVerified: false,
         verificationCode: code,
         privacyAcceptedAt: new Date().toISOString(),
-        privacyPolicyVersion: req.body.privacyPolicyVersion || 'unknown'
+        privacyPolicyVersion: req.body.privacyPolicyVersion || 'unknown',
+        marketingConsent,
+        marketingConsentAt: marketingConsent ? new Date().toISOString() : undefined,
+        thirdPartyMarketingConsent,
+        thirdPartyMarketingConsentAt: thirdPartyMarketingConsent ? new Date().toISOString() : undefined,
+        marketingConsentPolicyVersion: (marketingConsent || thirdPartyMarketingConsent) ? (req.body.marketingConsentPolicyVersion || 'unknown') : undefined
       };
 
       await addUser(newUser);
@@ -1653,17 +1674,23 @@ async function startServer() {
     }
     try {
       const allUsers = await getUsers();
-      let csvContent = '\uFEFFID,Username,Email,Password,Rating,Wins,Losses,CreatedAt\n';
+      // Nota: la colonna "Password" (hash bcrypt) \u00E8 volutamente esclusa da questo
+      // export: dato sensibile non necessario a questo scopo. I due consensi
+      // marketing sono in colonne separate (basi giuridiche distinte).
+      let csvContent = '\uFEFFID,Username,Email,Rating,Wins,Losses,CreatedAt,ConsensoMarketing,ConsensoMarketingData,ConsensoTerzi,ConsensoTerziData\n';
       allUsers.forEach(u => {
         const row = [
           u.id,
           `"${(u.username || '').replace(/"/g, '""')}"`,
           `"${(u.email || '').replace(/"/g, '""')}"`,
-          `"${(u.password || '').replace(/"/g, '""')}"`,
           u.rating,
           u.wins,
           u.losses,
-          u.createdAt || ''
+          u.createdAt || '',
+          u.marketingConsent ? 'Si' : 'No',
+          u.marketingConsentAt || '',
+          u.thirdPartyMarketingConsent ? 'Si' : 'No',
+          u.thirdPartyMarketingConsentAt || ''
         ].join(',');
         csvContent += row + '\n';
       });
